@@ -4,6 +4,15 @@
 #include <fstream>
 #include <Windows.h>
 
+// instructions that need to be "fixed"
+struct relative_instruction {
+  // virtual offset of this instruction
+  std::size_t new_virtual_offset;
+
+  // relative offset to the target
+  std::int32_t target_delta;
+};
+
 class chum_parser {
 public:
   chum_parser(char const* const file_path) {
@@ -39,10 +48,23 @@ public:
       &file_buffer_[rva_to_file_offset(exception_dir.VirtualAddress)]);
     runtime_funcs_count_ = exception_dir.Size / sizeof(RUNTIME_FUNCTION);
 
-    if (!parse()) {
+    if (!parse())
       printf("[!] Failed to parse binary.\n");
-      return;
-    }
+  }
+
+  // write the new binary to memory
+  bool write() {
+    return true;
+  }
+
+  // memory where code will reside (X)
+  void add_code_region(void* const virtual_address, std::size_t const size) {
+    code_regions_.push_back({ static_cast<std::uint8_t*>(virtual_address), size });
+  }
+
+  // memory where data will reside (RW)
+  void add_data_region(void* const virtual_address, std::size_t const size) {
+    data_regions_.push_back({ static_cast<std::uint8_t*>(virtual_address), size });
   }
 
 private:
@@ -51,6 +73,7 @@ private:
     // TODO: add external references to code regions that are not covered by
     //       exception directory.
 
+    
     // disassemble every function and create a list of instructions that
     // will need to be fixed later on.
     for (std::size_t i = 0; i < runtime_funcs_count_; ++i) {
@@ -61,11 +84,13 @@ private:
       auto const region_file_offset = rva_to_file_offset(runtime_func.BeginAddress);
       auto const region_size        = (runtime_func.EndAddress - runtime_func.BeginAddress);
 
-      // disassemble every instruction in this region
-      for (std::size_t instruction_offset = 0; instruction_offset < region_size;) {
-        ZydisDecodedInstruction decoded_instruction;
-        ZydisDecodedOperand decoded_operands[ZYDIS_MAX_OPERAND_COUNT_VISIBLE];
+      ZydisDecodedInstruction decoded_instruction;
+      ZydisDecodedOperand decoded_operands[ZYDIS_MAX_OPERAND_COUNT_VISIBLE];
 
+      // disassemble every instruction in this region
+      for (std::size_t instruction_offset = 0;
+           instruction_offset < region_size;
+           instruction_offset += decoded_instruction.length) {
         // pointer to the current instruction in the binary blob
         auto const buffer_curr_instruction = &file_buffer_[region_file_offset + instruction_offset];
         auto const remaining_size = (region_size - instruction_offset);
@@ -83,11 +108,34 @@ private:
           break;
         }
 
-        printf("[+] Decoded instruction. VA=0x%zX. Length=0x%X.\n",
-          region_virt_offset + instruction_offset, decoded_instruction.length);
+        // we only need to fix relative instructions
+        if (!(decoded_instruction.attributes & ZYDIS_ATTRIB_IS_RELATIVE))
+          continue;
 
-        // proceed to the next contiguous instruction
-        instruction_offset += decoded_instruction.length;
+        // only one of the operands can be relative (i think?)
+        for (std::size_t j = 0; j < decoded_instruction.operand_count_visible; ++j) {
+          auto const& op = decoded_operands[j];
+
+          // memory references
+          if (op.type == ZYDIS_OPERAND_TYPE_MEMORY) {
+            // sanity check
+            if (op.mem.base  != ZYDIS_REGISTER_RIP  ||
+                op.mem.index != ZYDIS_REGISTER_NONE ||
+                op.mem.scale != 0 ||
+               !op.mem.disp.has_displacement) {
+              printf("[!] Memory operand isn't RIP-relative!\n");
+              return false;
+            }
+
+            printf("[+] Memory operand displacement: %+zd.\n", op.mem.disp.value);
+            break;
+          }
+          // relative CALLs, JMPs, etc
+          else if (op.type == ZYDIS_OPERAND_TYPE_IMMEDIATE && op.imm.is_relative) {
+            printf("[+] Immediate operand value: %+zd.\n", op.imm.value.s);
+            break;
+          }
+        }
       }
     }
 
@@ -125,6 +173,12 @@ private:
   }
 
 private:
+  struct memory_region {
+    std::uint8_t* virtual_address;
+    std::size_t size;
+  };
+
+private:
   // zydis
   ZydisDecoder decoder_     = {};
   ZydisFormatter formatter_ = {};
@@ -140,8 +194,19 @@ private:
   // exception directory
   PRUNTIME_FUNCTION runtime_funcs_ = nullptr;
   std::size_t runtime_funcs_count_ = 0;
+
+  // this is where the binary will be written to
+  std::vector<memory_region> code_regions_ = {};
+  std::vector<memory_region> data_regions_ = {};
 };
 
 int main() {
   chum_parser chum("./hello-world-x64.dll");
+
+  // add 0x2000 bytes of executable memory and 0x2000 bytes of read-write memory
+  chum.add_code_region(VirtualAlloc(nullptr, 0x2000, MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE), 0x2000);
+  chum.add_data_region(VirtualAlloc(nullptr, 0x2000, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE),         0x2000);
+
+  if (!chum.write())
+    printf("[!] Failed to write binary to memory.\n");
 }

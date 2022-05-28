@@ -54,12 +54,109 @@ public:
 
   // write the new binary to memory
   bool write() {
+    // total number of bytes that have been written so far
+    std::size_t curr_flat_offset = 0;
+    
+    // number of bytes that have been written to the current code region
+    std::size_t curr_region_offset = 0;
+
+    // index of the region that is currently being written to
+    std::size_t curr_region_idx = 0;
+
+    // copy every instruction to the new binary
+    for (std::size_t i = 0; i < runtime_funcs_count_; ++i) {
+      auto const& runtime_func = runtime_funcs_[i];
+
+      // virtual offset, file offset, and size of the current code block
+      auto const block_virt_offset = runtime_func.BeginAddress;
+      auto const block_file_offset = rva_to_file_offset(runtime_func.BeginAddress);
+      auto const block_size        = (runtime_func.EndAddress - runtime_func.BeginAddress);
+
+      // disassemble every instruction in this block
+      for (std::size_t instruction_offset = 0; instruction_offset < block_size;) {
+        ZydisDecodedInstruction decoded_instruction;
+        ZydisDecodedOperand decoded_operands[ZYDIS_MAX_OPERAND_COUNT_VISIBLE];
+
+        // pointer to the current instruction in the binary blob
+        auto const buffer_curr_instruction = &file_buffer_[block_file_offset + instruction_offset];
+        auto const remaining_size = (block_size - instruction_offset);
+
+        // decode the current instruction
+        auto status = ZydisDecoderDecodeFull(&decoder_, buffer_curr_instruction,
+          remaining_size, &decoded_instruction, decoded_operands,
+          ZYDIS_MAX_OPERAND_COUNT_VISIBLE, ZYDIS_DFLAG_VISIBLE_OPERANDS_ONLY);
+        
+        // this *really* shouldn't happen but it isn't a fatal error... just
+        // ignore any possible remaining instructions in the block.
+        if (ZYAN_FAILED(status)) {
+          printf("[!] Failed to decode instruction! VA=0x%zX. Status=0x%X.\n",
+            block_virt_offset + instruction_offset, status);
+          break;
+        }
+
+        ZydisEncoderRequest enc_request;
+
+        // create a request that will encode the exact same instruction that was decoded
+        status = ZydisEncoderDecodedInstructionToEncoderRequest(&decoded_instruction,
+          decoded_operands, decoded_instruction.operand_count_visible, &enc_request);
+
+        if (ZYAN_FAILED(status)) {
+          printf("[!] Failed to create encoder request: status=0x%X.\n", status);
+          return false;
+        }
+
+        // we want the encoder to automatically use the smallest instruction available
+        enc_request.branch_type  = ZYDIS_BRANCH_TYPE_NONE;
+        enc_request.branch_width = ZYDIS_BRANCH_WIDTH_NONE;
+
+        std::uint8_t encoded_instruction[ZYDIS_MAX_INSTRUCTION_LENGTH];
+        std::size_t instruction_length = ZYDIS_MAX_INSTRUCTION_LENGTH;
+
+        // encode the new instruction
+        status = ZydisEncoderEncodeInstruction(&enc_request, encoded_instruction, &instruction_length);
+
+        if (ZYAN_FAILED(status)) {
+          printf("[!] Failed to encode instruction: status=0x%X.\n", status);
+          return false;
+        }
+
+        auto const& curr_region = code_regions_[curr_region_idx];
+
+        // check if we still have space in the current region to write this instruction
+        if (curr_region_offset + instruction_length > curr_region.size) {
+          // TODO: encode a jmp to the next region
+          curr_region_offset = 0;
+
+          printf("[!] Ran out of space in the current code region.\n");
+          return false;
+        }
+
+        // copy the encoded instruction to memory
+        memcpy(curr_region.virtual_address + curr_region_offset,
+          encoded_instruction, instruction_length);
+
+        printf("[+] Wrote instruction to code region %zX:%zX. Old virtual offset: %zX. New virtual address: %p. Raw bytes:",
+          curr_region_idx, curr_region_offset, block_virt_offset + instruction_offset, curr_region.virtual_address + curr_region_offset);
+
+        for (std::size_t j = 0; j < instruction_length; ++j)
+          printf(" %.2X", encoded_instruction[j]);
+
+        printf("\n");
+
+        instruction_offset += decoded_instruction.length;
+        curr_region_offset += instruction_length;
+        curr_flat_offset   += instruction_length;
+      }
+    }
+
     return true;
   }
 
   // memory where code will reside (X)
   void add_code_region(void* const virtual_address, std::size_t const size) {
     code_regions_.push_back({ static_cast<std::uint8_t*>(virtual_address), size });
+
+    // TODO: make sure the code regions are sorted
   }
 
   // memory where data will reside (RW)
@@ -70,7 +167,7 @@ public:
 private:
   // the real "meat" of the parser
   bool parse() {
-    // TODO: add external references to code regions that are not covered by
+    // TODO: add external references to code blocks that are not covered by
     //       exception directory.
 
     
@@ -79,21 +176,21 @@ private:
     for (std::size_t i = 0; i < runtime_funcs_count_; ++i) {
       auto const& runtime_func = runtime_funcs_[i];
 
-      // virtual offset, file offset, and size of the current code region
-      auto const region_virt_offset = runtime_func.BeginAddress;
-      auto const region_file_offset = rva_to_file_offset(runtime_func.BeginAddress);
-      auto const region_size        = (runtime_func.EndAddress - runtime_func.BeginAddress);
+      // virtual offset, file offset, and size of the current code block
+      auto const block_virt_offset = runtime_func.BeginAddress;
+      auto const block_file_offset = rva_to_file_offset(runtime_func.BeginAddress);
+      auto const block_size        = (runtime_func.EndAddress - runtime_func.BeginAddress);
 
       ZydisDecodedInstruction decoded_instruction;
       ZydisDecodedOperand decoded_operands[ZYDIS_MAX_OPERAND_COUNT_VISIBLE];
 
-      // disassemble every instruction in this region
+      // disassemble every instruction in this block
       for (std::size_t instruction_offset = 0;
-           instruction_offset < region_size;
+           instruction_offset < block_size;
            instruction_offset += decoded_instruction.length) {
         // pointer to the current instruction in the binary blob
-        auto const buffer_curr_instruction = &file_buffer_[region_file_offset + instruction_offset];
-        auto const remaining_size = (region_size - instruction_offset);
+        auto const buffer_curr_instruction = &file_buffer_[block_file_offset + instruction_offset];
+        auto const remaining_size = (block_size - instruction_offset);
 
         // decode the current instruction
         auto const status = ZydisDecoderDecodeFull(&decoder_, buffer_curr_instruction,
@@ -101,10 +198,10 @@ private:
           ZYDIS_MAX_OPERAND_COUNT_VISIBLE, ZYDIS_DFLAG_VISIBLE_OPERANDS_ONLY);
         
         // this *really* shouldn't happen but it isn't a fatal error... just
-        // ignore any possible remaining instructions in the region.
+        // ignore any possible remaining instructions in the block.
         if (ZYAN_FAILED(status)) {
           printf("[!] Failed to decode instruction! VA=0x%zX. Status=0x%X.\n",
-            region_virt_offset + instruction_offset, status);
+            block_virt_offset + instruction_offset, status);
           break;
         }
 

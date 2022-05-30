@@ -7,10 +7,19 @@
 // instructions that need to be "fixed"
 struct relative_instruction {
   // virtual offset of this instruction
-  std::size_t new_virtual_offset;
+  std::size_t virtual_offset;
 
   // relative offset to the target
-  std::int32_t target_delta;
+  std::int64_t target_delta;
+};
+
+// an instruction that was modified/replaced by another instruction(s) that
+// have a different size (therefore size_delta will never be 0).
+struct modified_instruction {
+  std::size_t virtual_offset;
+
+  // difference between the old instruction size and the new instruction size (new - old)
+  std::int8_t size_delta;
 };
 
 class chum_parser {
@@ -63,6 +72,13 @@ public:
     // index of the region that is currently being written to
     std::size_t curr_region_idx = 0;
 
+    // index of the next reloc instruction
+    std::size_t next_reloc_idx = 0;
+
+    // we need to keep track of each modified instruction so that we can
+    // accurately calculate the new relative distances.
+    std::vector<modified_instruction> modified_instructions = {};
+
     // copy every instruction to the new binary
     for (std::size_t i = 0; i < runtime_funcs_count_; ++i) {
       auto const& runtime_func = runtime_funcs_[i];
@@ -109,6 +125,91 @@ public:
         enc_request.branch_type  = ZYDIS_BRANCH_TYPE_NONE;
         enc_request.branch_width = ZYDIS_BRANCH_WIDTH_NONE;
 
+        // relative instructions can't be written as-is
+        if (next_reloc_idx < relative_instructions.size() &&
+            relative_instructions[next_reloc_idx].virtual_offset ==
+            (block_virt_offset + instruction_offset)) {
+          auto const& relinstr = relative_instructions[next_reloc_idx++];
+
+          // absolute virtual offset of the target
+          auto const target = relinstr.virtual_offset + decoded_instruction.length + relinstr.target_delta;
+
+          printf("[+] Relative instruction:\n");
+          printf("[+]   Target delta: %+zd.\n", relinstr.target_delta);
+          printf("[+]   Target virtual offset: %zX.\n", target);
+
+          // backwards targets can be fixed immediately
+          if (relinstr.target_delta < 0) {
+            printf("[+]   Backwards target.\n");
+
+            bool found_new_target = false;
+
+            // this is the new target delta (starting from the
+            // address of the CURRENT instruction, not the NEXT)
+            std::int64_t adjusted_delta = 0;
+
+            // the first code block is a special case
+            adjusted_delta -= instruction_offset;
+
+            // if the target is in the same block as this instruction
+            if (target >= block_virt_offset) {
+              adjusted_delta += (target - block_virt_offset);
+              found_new_target = true;
+
+              printf("[+]   Found code block: %zu.\n", i);
+            }
+            // target destination is in another block
+            else {
+              // find the code block that the target resides in
+              for (std::size_t j = i; j > 0; --j) {
+                auto const& b = runtime_funcs_[j - 1];
+
+                if (target >= b.BeginAddress && target < b.EndAddress) {
+                  // add all of the region up until we reach the target
+                  adjusted_delta -= (b.EndAddress - target);
+                  found_new_target = true;
+
+                  printf("[+]   Found code block: %zu.\n", j);
+                  break;
+                }
+
+                // add the entire region
+                adjusted_delta -= (b.EndAddress - b.BeginAddress);
+              }
+            }
+
+            if (found_new_target) {
+              printf("[+]   Adjusted delta (pre-reloc): %+zd.\n", adjusted_delta);
+
+              for (auto j = modified_instructions.size(); j > 0; --j) {
+                auto const& m = modified_instructions[j - 1];
+                if (m.virtual_offset < target)
+                  break;
+                
+                adjusted_delta -= m.size_delta;
+              }
+
+              printf("[+]   Adjusted delta (post-reloc): %+zd.\n", adjusted_delta);
+              printf("[+]   Adjusted target virtual offset: %zX.\n", curr_flat_offset + adjusted_delta);
+
+              char orig_target_instruction[256];
+              char adju_target_instruction[256];
+              disassemble_and_format(&file_buffer_[rva_to_file_offset(target)], 15, orig_target_instruction, 256);
+              disassemble_and_format(&code_regions_[0].virtual_address[curr_flat_offset + adjusted_delta], 15, adju_target_instruction, 256);
+
+              printf("[+]   Target instruction (original): %s.\n", orig_target_instruction);
+              printf("[+]   Target instruction (adjusted): %s.\n", adju_target_instruction);
+            }
+            else {
+              printf("[!]   Failed to calculate new target.\n");
+            }
+          }
+          // forwards targets need to be fixed later
+          else {
+            printf("[+]   Forwards target.\n");
+          }
+        }
+
         std::uint8_t encoded_instruction[ZYDIS_MAX_INSTRUCTION_LENGTH];
         std::size_t instruction_length = ZYDIS_MAX_INSTRUCTION_LENGTH;
 
@@ -118,6 +219,13 @@ public:
         if (ZYAN_FAILED(status)) {
           printf("[!] Failed to encode instruction: status=0x%X.\n", status);
           return false;
+        }
+
+        // add to the list of modified instructions if the new instruction
+        // length doesn't equal the original instruction length.
+        if (instruction_length != decoded_instruction.length) {
+          modified_instructions.push_back({ block_virt_offset + instruction_offset,
+            static_cast<std::int8_t>(instruction_length) - static_cast<std::int8_t>(decoded_instruction.length) });
         }
 
         auto const& curr_region = code_regions_[curr_region_idx];
@@ -135,8 +243,8 @@ public:
         memcpy(curr_region.virtual_address + curr_region_offset,
           encoded_instruction, instruction_length);
 
-        printf("[+] Wrote instruction to code region %zX:%zX. Old virtual offset: %zX. New virtual address: %p. Raw bytes:",
-          curr_region_idx, curr_region_offset, block_virt_offset + instruction_offset, curr_region.virtual_address + curr_region_offset);
+        printf("[+] Wrote instruction to code region %zX:%p:%zX. Virtual offset: %zX. Raw bytes:",
+          curr_region_idx, curr_region.virtual_address, curr_region_offset, block_virt_offset + instruction_offset);
 
         for (std::size_t j = 0; j < instruction_length; ++j)
           printf(" %.2X", encoded_instruction[j]);
@@ -170,7 +278,6 @@ private:
     // TODO: add external references to code blocks that are not covered by
     //       exception directory.
 
-    
     // disassemble every function and create a list of instructions that
     // will need to be fixed later on.
     for (std::size_t i = 0; i < runtime_funcs_count_; ++i) {
@@ -225,11 +332,15 @@ private:
             }
 
             printf("[+] Memory operand displacement: %+zd.\n", op.mem.disp.value);
+
+            relative_instructions.push_back({ block_virt_offset + instruction_offset, op.mem.disp.value });
             break;
           }
           // relative CALLs, JMPs, etc
           else if (op.type == ZYDIS_OPERAND_TYPE_IMMEDIATE && op.imm.is_relative) {
             printf("[+] Immediate operand value: %+zd.\n", op.imm.value.s);
+
+            relative_instructions.push_back({ block_virt_offset + instruction_offset, op.imm.value.s });
             break;
           }
         }
@@ -269,6 +380,17 @@ private:
     return 0;
   }
 
+  void disassemble_and_format(void const* const buffer,
+      std::size_t const length, char* const str, std::size_t const str_size) {
+    ZydisDecodedInstruction instruction;
+    ZydisDecodedOperand operands[ZYDIS_MAX_OPERAND_COUNT_VISIBLE];
+
+    ZydisDecoderDecodeFull(&decoder_, buffer, length, &instruction, operands,
+      ZYDIS_MAX_OPERAND_COUNT_VISIBLE, ZYDIS_DFLAG_VISIBLE_OPERANDS_ONLY);
+    
+    ZydisFormatterFormatInstruction(&formatter_, &instruction, operands,
+      instruction.operand_count_visible, str, str_size, ZYDIS_RUNTIME_ADDRESS_NONE);
+  }
 private:
   struct memory_region {
     std::uint8_t* virtual_address;
@@ -295,6 +417,9 @@ private:
   // this is where the binary will be written to
   std::vector<memory_region> code_regions_ = {};
   std::vector<memory_region> data_regions_ = {};
+
+  // instructions that need to be fixed
+  std::vector<relative_instruction> relative_instructions = {};
 };
 
 int main() {

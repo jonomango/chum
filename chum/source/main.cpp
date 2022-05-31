@@ -22,6 +22,10 @@ struct modified_instruction {
   std::int8_t size_delta;
 };
 
+// TODO: make the code_block structure smaller. size fields can be a single
+//       byte each (they're RARELY that big, if ever) and if they happen to
+//       overflow, simply split the code block. the file offset can also be
+//       derived from the virtual offset (or vise-versa).
 struct code_block {
   // the absolute virtual address of this code block after being written to memory
   void* final_virtual_address;
@@ -37,7 +41,10 @@ struct code_block {
 
   // size of the instructions after being written to memory. if not written
   // yet, this is the pessimistic expected size of the code block.
-  std::uint32_t final_size;
+  union {
+    std::uint32_t expected_size;
+    std::uint32_t final_size;
+  };
 
   // relative code blocks contain a SINGLE instruction that is RIP-relative
   bool is_relative : 1;
@@ -80,6 +87,74 @@ public:
 
     if (!parse())
       printf("[!] Failed to parse binary.\n");
+  }
+
+  bool write_2() {
+    // index of the code region that we are currently writing to
+    std::size_t curr_region_idx = 0;
+
+    // current write offset into the current region
+    std::uint32_t curr_region_offset = 0;
+
+    if (code_regions_.empty()) {
+      printf("[!] No code regions provided.\n");
+      return false;
+    }
+
+    for (auto& cb : code_blocks_) {
+      print_code_block(cb);
+
+      // the current region we're writing to
+      auto const& curr_region = code_regions_[curr_region_idx];
+
+      // amount of space left in the current region
+      auto const remaining_region_size = (curr_region.size - curr_region_offset);
+
+      // non-relative instructions can be directly memcpy'd
+      if (!cb.is_relative) {
+        // TODO: account for the jmp stub size
+        if (cb.file_size > remaining_region_size) {
+          // TODO: write a jmp to the next region
+          printf("[!] Ran out of space in the current code region.\n");
+          return false;
+        }
+
+        cb.final_virtual_address = curr_region.virtual_address + curr_region_offset;
+        cb.final_size            = cb.file_size;
+
+        memcpy(curr_region.virtual_address + curr_region_offset,
+          &file_buffer_[cb.file_offset], cb.file_size);
+        
+        printf("[+] Copied 0x%X bytes from +0x%X to 0x%zX.\n",
+          cb.file_size, cb.virtual_offset, cb.final_virtual_address);
+
+        curr_region_offset += cb.file_size;
+        continue;
+      }
+
+      ZydisDecodedInstruction decoded_instruction;
+      ZydisDecodedOperand decoded_operands[ZYDIS_MAX_OPERAND_COUNT_VISIBLE];
+
+      // decode the current instruction
+      auto const status = ZydisDecoderDecodeFull(&decoder_,
+        &file_buffer_[cb.file_offset], cb.file_size, &decoded_instruction,
+        decoded_operands, ZYDIS_MAX_OPERAND_COUNT_VISIBLE,
+        ZYDIS_DFLAG_VISIBLE_OPERANDS_ONLY);
+
+      if (ZYAN_FAILED(status)) {
+        printf("[!] Failed to decode instruction. Status = 0x%X.\n", status);
+        return false;
+      }
+
+      // find the relative operand.
+      // determine if its forwards or backwards.
+    }
+
+
+    printf("[+] # of code blocks: %zu (0x%zX bytes).\n",
+      code_blocks_.size(), code_blocks_.size() * sizeof(code_block));
+
+    return true;
   }
 
   // write the new binary to memory
@@ -278,32 +353,6 @@ public:
       }
     }
 
-    for (auto const& cb : code_blocks_) {
-      printf("[+] Entering new code block:\n");
-      printf("[+]   is_relative    = %d.\n", cb.is_relative);
-      printf("[+]   virtual_offset = %X.\n", cb.virtual_offset);
-      printf("[+]   file_offset    = %X.\n", cb.file_offset);
-      printf("[+]   file_size      = %X.\n", cb.file_size);
-      if (cb.is_relative)
-        printf("[+]   expected_size  = %X.\n", cb.final_size);
-      printf("[+]   instructions:\n");
-
-      std::size_t offset = 0;
-      while (offset < cb.file_size) {
-        char str[256];
-        auto const length = disassemble_and_format(
-          &file_buffer_[cb.file_offset + offset], cb.file_size - offset, str, 256);
-        
-        printf("[+]    ");
-        for (std::size_t i = 0; i < length; ++i)
-          printf(" %.2X", file_buffer_[cb.file_offset + offset + i]);
-        for (std::size_t i = 0; i < (15 - length); ++i)
-          printf("   ");
-        printf(" %s.\n", str);
-        offset += length;
-      }
-    }
-
     return true;
   }
 
@@ -408,9 +457,9 @@ private:
         assert(cb->file_size <= 0);
 
         // change the current (empty) code block into a relative code block
-        cb->is_relative = true;
-        cb->file_size  += decoded_instruction.length;
-        cb->final_size += decoded_instruction.length + 69;
+        cb->is_relative    = true;
+        cb->file_size     += decoded_instruction.length;
+        cb->expected_size += decoded_instruction.length + 69;
 
         // only one of the operands can be relative (i think?)
         for (std::size_t j = 0; j < decoded_instruction.operand_count_visible; ++j) {
@@ -477,7 +526,7 @@ private:
   }
 
   std::uint8_t disassemble_and_format(void const* const buffer,
-      std::size_t const length, char* const str, std::size_t const str_size) {
+      std::size_t const length, char* const str, std::size_t const str_size) const {
     ZydisDecodedInstruction instruction;
     ZydisDecodedOperand operands[ZYDIS_MAX_OPERAND_COUNT_VISIBLE];
 
@@ -488,6 +537,36 @@ private:
       instruction.operand_count_visible, str, str_size, ZYDIS_RUNTIME_ADDRESS_NONE);
 
     return instruction.length;
+  }
+
+  void print_code_block(code_block const& cb) const {
+    printf("[+] Code block:\n");
+
+    printf("[+]   is_relative    = %d.\n", cb.is_relative);
+    printf("[+]   virtual_offset = 0x%X.\n", cb.virtual_offset);
+    printf("[+]   file_offset    = 0x%X.\n", cb.file_offset);
+    printf("[+]   file_size      = 0x%X.\n", cb.file_size);
+
+    if (cb.is_relative)
+      printf("[+]   expected_size  = 0x%X.\n", cb.final_size);
+
+    printf("[+]   instructions:\n");
+
+    std::size_t offset = 0;
+    while (offset < cb.file_size) {
+      char str[256];
+      auto const length = disassemble_and_format(
+        &file_buffer_[cb.file_offset + offset], cb.file_size - offset, str, 256);
+      
+      printf("[+]    ");
+      for (std::size_t i = 0; i < length; ++i)
+        printf(" %.2X", file_buffer_[cb.file_offset + offset + i]);
+      for (std::size_t i = 0; i < (15 - length); ++i)
+        printf("   ");
+      printf(" %s.\n", str);
+
+      offset += length;
+    }
   }
 
 private:
@@ -530,6 +609,6 @@ int main() {
   chum.add_code_region(VirtualAlloc(nullptr, 0x2000, MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE), 0x2000);
   chum.add_data_region(VirtualAlloc(nullptr, 0x2000, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE),         0x2000);
 
-  if (!chum.write())
+  if (!chum.write_2())
     printf("[!] Failed to write binary to memory.\n");
 }

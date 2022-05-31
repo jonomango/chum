@@ -22,6 +22,27 @@ struct modified_instruction {
   std::int8_t size_delta;
 };
 
+struct code_block {
+  // the absolute virtual address of this code block after being written to memory
+  void* final_virtual_address;
+
+  // virtual offset of this code block in the original binary
+  std::uint32_t virtual_offset;
+
+  // file offset in the raw binary
+  std::uint32_t file_offset;
+
+  // size of the instructions on file
+  std::uint32_t file_size;
+
+  // size of the instructions after being written to memory. if not written
+  // yet, this is the pessimistic expected size of the code block.
+  std::uint32_t final_size;
+
+  // relative code blocks contain a SINGLE instruction that is RIP-relative
+  bool is_relative : 1;
+};
+
 class chum_parser {
 public:
   chum_parser(char const* const file_path) {
@@ -257,6 +278,32 @@ public:
       }
     }
 
+    for (auto const& cb : code_blocks_) {
+      printf("[+] Entering new code block:\n");
+      printf("[+]   is_relative    = %d.\n", cb.is_relative);
+      printf("[+]   virtual_offset = %X.\n", cb.virtual_offset);
+      printf("[+]   file_offset    = %X.\n", cb.file_offset);
+      printf("[+]   file_size      = %X.\n", cb.file_size);
+      if (cb.is_relative)
+        printf("[+]   expected_size  = %X.\n", cb.final_size);
+      printf("[+]   instructions:\n");
+
+      std::size_t offset = 0;
+      while (offset < cb.file_size) {
+        char str[256];
+        auto const length = disassemble_and_format(
+          &file_buffer_[cb.file_offset + offset], cb.file_size - offset, str, 256);
+        
+        printf("[+]    ");
+        for (std::size_t i = 0; i < length; ++i)
+          printf(" %.2X", file_buffer_[cb.file_offset + offset + i]);
+        for (std::size_t i = 0; i < (15 - length); ++i)
+          printf("   ");
+        printf(" %s.\n", str);
+        offset += length;
+      }
+    }
+
     return true;
   }
 
@@ -291,6 +338,17 @@ private:
       ZydisDecodedInstruction decoded_instruction;
       ZydisDecodedOperand decoded_operands[ZYDIS_MAX_OPERAND_COUNT_VISIBLE];
 
+      // create a new code block
+      auto cb = &code_blocks_.emplace_back();
+      cb->is_relative = false;
+
+      cb->final_virtual_address = 0;
+      cb->final_size            = 0;
+
+      cb->virtual_offset = block_virt_offset;
+      cb->file_offset    = block_file_offset;
+      cb->file_size      = 0;
+
       // disassemble every instruction in this block
       for (std::size_t instruction_offset = 0;
            instruction_offset < block_size;
@@ -312,9 +370,47 @@ private:
           break;
         }
 
-        // we only need to fix relative instructions
-        if (!(decoded_instruction.attributes & ZYDIS_ATTRIB_IS_RELATIVE))
+        // if the current code block is relative, we need to create a new, empty, non-relative one
+        if (cb->is_relative) {
+          cb = &code_blocks_.emplace_back();
+          cb->is_relative = false;
+
+          cb->final_virtual_address = 0;
+          cb->final_size            = 0;
+
+          cb->virtual_offset = block_virt_offset + instruction_offset;
+          cb->file_offset    = block_file_offset + instruction_offset;
+          cb->file_size      = 0;
+        }
+
+        // non-relative instructions (these can simply be memcpy'd to memory)
+        if (!(decoded_instruction.attributes & ZYDIS_ATTRIB_IS_RELATIVE)) {
+          assert(!cb->is_relative);
+
+          cb->file_size  += decoded_instruction.length;
+          cb->final_size += decoded_instruction.length;
           continue;
+        }
+
+        // we need to end the current code block and create a new empty one
+        if (cb->file_size > 0) {
+          cb = &code_blocks_.emplace_back();
+          cb->is_relative = false;
+
+          cb->final_virtual_address = 0;
+          cb->final_size            = 0;
+
+          cb->virtual_offset = block_virt_offset + instruction_offset;
+          cb->file_offset    = block_file_offset + instruction_offset;
+          cb->file_size      = 0;
+        }
+
+        assert(cb->file_size <= 0);
+
+        // change the current (empty) code block into a relative code block
+        cb->is_relative = true;
+        cb->file_size  += decoded_instruction.length;
+        cb->final_size += decoded_instruction.length + 69;
 
         // only one of the operands can be relative (i think?)
         for (std::size_t j = 0; j < decoded_instruction.operand_count_visible; ++j) {
@@ -369,7 +465,7 @@ private:
   }
 
   // convert an RVA offset to a file offset
-  std::size_t rva_to_file_offset(std::size_t const rva) const {
+  std::uint32_t rva_to_file_offset(std::uint32_t const rva) const {
     for (std::size_t i = 0; i < nt_header_->FileHeader.NumberOfSections; ++i) {
       auto const& section = sections_[i];
 
@@ -380,7 +476,7 @@ private:
     return 0;
   }
 
-  void disassemble_and_format(void const* const buffer,
+  std::uint8_t disassemble_and_format(void const* const buffer,
       std::size_t const length, char* const str, std::size_t const str_size) {
     ZydisDecodedInstruction instruction;
     ZydisDecodedOperand operands[ZYDIS_MAX_OPERAND_COUNT_VISIBLE];
@@ -390,7 +486,10 @@ private:
     
     ZydisFormatterFormatInstruction(&formatter_, &instruction, operands,
       instruction.operand_count_visible, str, str_size, ZYDIS_RUNTIME_ADDRESS_NONE);
+
+    return instruction.length;
   }
+
 private:
   struct memory_region {
     std::uint8_t* virtual_address;
@@ -420,6 +519,8 @@ private:
 
   // instructions that need to be fixed
   std::vector<relative_instruction> relative_instructions = {};
+
+  std::vector<code_block> code_blocks_ = {};
 };
 
 int main() {

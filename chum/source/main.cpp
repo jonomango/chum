@@ -28,7 +28,7 @@ struct modified_instruction {
 //       derived from the virtual offset (or vise-versa).
 struct code_block {
   // the absolute virtual address of this code block after being written to memory
-  void* final_virtual_address;
+  std::uint8_t* final_virtual_address;
 
   // virtual offset of this code block in the original binary
   std::uint32_t virtual_offset;
@@ -101,7 +101,9 @@ public:
       return false;
     }
 
-    for (auto& cb : code_blocks_) {
+    for (std::size_t curr_cb_idx = 0; curr_cb_idx < code_blocks_.size(); ++curr_cb_idx) {
+      auto& cb = code_blocks_[curr_cb_idx];
+
       print_code_block(cb);
 
       // the current region we're writing to
@@ -111,6 +113,9 @@ public:
       auto const remaining_region_size = (curr_region.size - curr_region_offset);
 
       // non-relative instructions can be directly memcpy'd
+      // TODO: make a function for copying instruction bytes to the current
+      //       code region (and possibly proceeding to the next region if
+      //       there isn't enough space).
       if (!cb.is_relative) {
         // TODO: account for the jmp stub size
         if (cb.file_size > remaining_region_size) {
@@ -128,7 +133,7 @@ public:
         printf("[+] Copied 0x%X bytes from +0x%X to 0x%zX.\n",
           cb.file_size, cb.virtual_offset, cb.final_virtual_address);
 
-        curr_region_offset += cb.file_size;
+        curr_region_offset += cb.final_size;
         continue;
       }
 
@@ -136,7 +141,7 @@ public:
       ZydisDecodedOperand decoded_operands[ZYDIS_MAX_OPERAND_COUNT_VISIBLE];
 
       // decode the current instruction
-      auto const status = ZydisDecoderDecodeFull(&decoder_,
+      auto status = ZydisDecoderDecodeFull(&decoder_,
         &file_buffer_[cb.file_offset], cb.file_size, &decoded_instruction,
         decoded_operands, ZYDIS_MAX_OPERAND_COUNT_VISIBLE,
         ZYDIS_DFLAG_VISIBLE_OPERANDS_ONLY);
@@ -146,10 +151,127 @@ public:
         return false;
       }
 
+      assert(decoded_instruction.attributes & ZYDIS_ATTRIB_IS_RELATIVE);
+
+      ZydisEncoderRequest encoder_request;
+
+      // create an encoder request from the decoded instruction
+      status = ZydisEncoderDecodedInstructionToEncoderRequest(&decoded_instruction,
+        decoded_operands, decoded_instruction.operand_count_visible, &encoder_request);
+
+      if (ZYAN_FAILED(status)) {
+        printf("[!] Failed to create encoder request. Status = 0x%X.\n", status);
+        return false;
+      }
+
+      // we want the encoder to automatically use the smallest instruction available
+      encoder_request.branch_type  = ZYDIS_BRANCH_TYPE_NONE;
+      encoder_request.branch_width = ZYDIS_BRANCH_WIDTH_NONE;
+
       // find the relative operand.
       // determine if its forwards or backwards.
-    }
+      for (std::size_t i = 0; i < decoded_instruction.operand_count_visible; ++i) {
+        auto const& op = decoded_operands[i];
 
+        // the value that is added to RIP to get the target address
+        std::int64_t* target_delta = nullptr;
+
+        // memory references
+        if (op.type == ZYDIS_OPERAND_TYPE_MEMORY) {
+          // sanity check
+          assert(op.mem.disp.has_displacement);
+          assert(op.mem.base  == ZYDIS_REGISTER_RIP);
+          assert(op.mem.index == ZYDIS_REGISTER_NONE);
+          assert(op.mem.scale == 0);
+
+          target_delta = &encoder_request.operands[i].mem.displacement;
+        }
+        // relative CALLs, JMPs, etc
+        else if (op.type == ZYDIS_OPERAND_TYPE_IMMEDIATE && op.imm.is_relative)
+          target_delta = &encoder_request.operands[i].imm.s;
+        else
+          continue;
+
+        assert(target_delta != nullptr);
+
+        // backwards targets can be fixed immediately
+        if (*target_delta < 0) {
+          printf("[+] Adjusting backwards target.\n");
+          printf("[+]   Target delta:                   -0x%zX.\n", -(*target_delta));
+
+          auto const target_virtual_offset = cb.virtual_offset +
+            decoded_instruction.length + *target_delta;
+          printf("[+]   Target virtual offset:          +0x%zX.\n", target_virtual_offset);
+
+          for (std::size_t j = 0; j < curr_cb_idx; ++j) {
+            auto const& target_cb = code_blocks_[j];
+
+            if (target_virtual_offset < target_cb.virtual_offset ||
+                target_virtual_offset >= (target_cb.virtual_offset + target_cb.file_size))
+              continue;
+
+            auto const offset = (target_virtual_offset - target_cb.virtual_offset);
+
+            // the new target delta
+            auto const adjusted_target_delta = (curr_region.virtual_address +
+              curr_region_offset + decoded_instruction.length) -
+              (target_cb.final_virtual_address + offset);
+
+            printf("[+]   Adjusted target delta:          -0x%zX.\n",
+              adjusted_target_delta);
+            printf("[+]   Adjusted target virtual address: 0x%zX.\n",
+              target_cb.final_virtual_address + offset);
+
+            char str[256];
+            disassemble_and_format(&file_buffer_[rva_to_file_offset(target_virtual_offset)], 15, str, 256);
+            printf("[+]   Original target instruction:     %s.\n", str);
+
+            disassemble_and_format(target_cb.final_virtual_address + offset, 15, str, 256);
+            printf("[+]   Adjusted target instruction:     %s.\n", str);
+
+            *target_delta = -adjusted_target_delta;
+            break;
+          }
+        }
+        else {
+          
+        }
+
+        break;
+      }
+
+      std::uint8_t new_instruction[ZYDIS_MAX_INSTRUCTION_LENGTH];
+      std::size_t new_instruction_length = ZYDIS_MAX_INSTRUCTION_LENGTH;
+
+      // encode the new "fixed" relative instruction
+      status = ZydisEncoderEncodeInstruction(&encoder_request,
+        new_instruction, &new_instruction_length);
+
+      if (ZYAN_FAILED(status)) {
+        printf("[!] Failed to encode relative instruction.\n");
+        return false;
+      }
+
+      if (new_instruction_length > remaining_region_size) {
+        printf("[!] Ran out of space in the current code region.\n");
+        return false;
+      }
+
+      cb.final_virtual_address = curr_region.virtual_address + curr_region_offset;
+      cb.final_size            = new_instruction_length;
+
+      memcpy(curr_region.virtual_address + curr_region_offset,
+        new_instruction, new_instruction_length);
+      
+      printf("[+] Encoded a new relative instruction at 0x%zX:\n",
+        cb.final_virtual_address);
+      
+      char str[256];
+      disassemble_and_format(new_instruction, new_instruction_length, str, 256);
+      printf("[+]   %s.\n", str);
+
+      curr_region_offset += cb.final_size;
+    }
 
     printf("[+] # of code blocks: %zu (0x%zX bytes).\n",
       code_blocks_.size(), code_blocks_.size() * sizeof(code_block));

@@ -579,6 +579,86 @@ private:
     return 0;
   }
 
+  // calculate the new target delta for a relative instruction. this new delta
+  // is relative to the start of the current instruction, rather than the end.
+  bool calculate_adjusted_target_delta(
+      std::uint8_t const* const current_instruction_address,
+      std::size_t         const current_cb_idx,
+      std::uint32_t       const target_virtual_offset,
+      std::int64_t&             target_delta,
+      bool&                     fully_resolved) const {
+    // get the current code block (which should be relative)
+    auto const& cb = code_blocks_[current_cb_idx];
+    assert(cb.is_relative);
+
+    // if the target is in a data block, we can immediately calculate the
+    // target delta (even if it is a forward target).
+    for (auto const& db : data_blocks_) {
+      if (target_virtual_offset < db.virtual_offset ||
+          target_virtual_offset >= (db.virtual_offset + db.virtual_size))
+        continue;
+
+      auto const target_final_address = db.final_virtual_address +
+        (target_virtual_offset - db.virtual_offset);
+
+      target_delta   = current_instruction_address - target_final_address;
+      fully_resolved = true;
+
+      return true;
+    }
+
+    // backward targets can also be immediately resolved since their
+    // final address has already been determined.
+    if (target_virtual_offset <= cb.virtual_offset) {
+      // search backwards for the code block that contains the target
+      for (std::size_t i = current_cb_idx + 1; i > 0; --i) {
+        auto const& cb = code_blocks_[i - 1];
+
+        if (target_virtual_offset < cb.virtual_offset ||
+            target_virtual_offset >= (cb.virtual_offset + cb.file_size))
+          continue;
+
+        // this is a bit of an edgecase so i'll just handle it when it comes up
+        assert(!cb.is_relative);
+
+        auto const target_final_address = cb.final_virtual_address +
+          (target_virtual_offset - cb.virtual_offset);
+
+        target_delta   = current_instruction_address - target_final_address;
+        fully_resolved = true;
+
+        return true;
+      }
+
+      // this is possible if the target isn't inside of any known code
+      // blocks (i.e. we don't have complete code coverage).
+      printf("[!] Failed to calculate backwards target delta.\n");
+      return false;
+    }
+
+    target_delta   = 0;
+    fully_resolved = false;
+
+    // forward targets can't be immediately resolved, so we're just gonna
+    // return the worst-case target delta. this will act as a placeholder
+    // until we're able to resolve the real delta.
+    for (std::size_t i = current_cb_idx; i < code_blocks_.size(); ++i) {
+      auto const& cb = code_blocks_[i];
+
+      target_delta  += cb.expected_size;
+
+      if (target_virtual_offset < cb.virtual_offset ||
+          target_virtual_offset >= (cb.virtual_offset + cb.file_size))
+        continue;
+
+      return true;
+    }
+
+    // this is possible if the target isn't inside of any known code
+    // blocks (i.e. we don't have complete code coverage).
+    return false;
+  }
+
   std::uint8_t disassemble_and_format(void const* const buffer,
       std::size_t const length, char* const str, std::size_t const str_size) const {
     ZydisDecodedInstruction instruction;
@@ -623,7 +703,6 @@ private:
     }
   }
 
-private:
 private:
   // zydis
   ZydisDecoder decoder_     = {};

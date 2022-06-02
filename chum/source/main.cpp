@@ -5,23 +5,10 @@
 #include <queue>
 #include <Windows.h>
 
-// instructions that need to be "fixed"
-struct relative_instruction {
-  // virtual offset of this instruction
-  std::size_t virtual_offset;
-
-  // relative offset to the target
-  std::int64_t target_delta;
-};
-
-// an instruction that was modified/replaced by another instruction(s) that
-// have a different size (therefore size_delta will never be 0).
-struct modified_instruction {
-  std::size_t virtual_offset;
-
-  // difference between the old instruction size and the new instruction size (new - old)
-  std::int8_t size_delta;
-};
+  struct memory_region {
+    std::uint8_t* virtual_address;
+    std::size_t size;
+  };
 
 // TODO: make the code_block structure smaller. size fields can be a single
 //       byte each (they're RARELY that big, if ever) and if they happen to
@@ -140,7 +127,7 @@ public:
 
     for (auto& db : data_blocks_) {
       // the current region we're writing to
-      auto const& curr_region = code_regions_[curr_region_idx];
+      auto const& curr_region = data_regions_[curr_region_idx];
 
       // amount of space left in the current region
       auto const remaining_region_size = (curr_region.size - curr_region_offset);
@@ -219,7 +206,7 @@ public:
 
         memcpy(curr_region.virtual_address + curr_region_offset,
           &file_buffer_[cb.file_offset], cb.file_size);
-        
+
         printf("[+] Copied 0x%X code bytes from +0x%X to 0x%p.\n",
           cb.file_size, cb.virtual_offset, cb.final_virtual_address);
 
@@ -287,11 +274,13 @@ public:
         auto const target_virtual_offset = cb.virtual_offset +
           decoded_instruction.length + *target_delta;
 
+        // TODO: fix targets into data regions immediately (even if they're forwards)
+
         // backward targets can be fixed immediately
         if (*target_delta < 0) {
           printf("[+] Adjusting backwards target.\n");
           printf("[+]   Target delta:                   -0x%zX.\n", -(*target_delta));
-          printf("[+]   Target virtual offset:          +0x%zX.\n", target_virtual_offset);
+          printf("[+]   Target virtual offset:           0x%zX.\n", target_virtual_offset);
 
           for (std::size_t j = 0; j < curr_cb_idx; ++j) {
             auto const& target_cb = code_blocks_[j];
@@ -328,8 +317,8 @@ public:
         // the instruction length for the worst case scenario.
         else {
           printf("[+] Estimating placeholder forwards target.\n");
-          printf("[+]   Target delta:                   +0x%zX.\n", *target_delta);
-          printf("[+]   Target virtual offset:          +0x%zX.\n", target_virtual_offset);
+          printf("[+]   Target delta:                    +0x%zX.\n", *target_delta);
+          printf("[+]   Target virtual offset:            0x%zX.\n", target_virtual_offset);
 
           bool is_data_target = false;
 
@@ -338,36 +327,53 @@ public:
                 target_virtual_offset >= (db.virtual_offset + db.virtual_size))
               continue;
 
+            auto const offset = target_virtual_offset - db.virtual_offset;
+            auto const adjusted_target_delta = (curr_region.virtual_address +
+              curr_region_offset + decoded_instruction.length) - 
+              (db.final_virtual_address + offset);
+
+            printf("[+]   Adjusted target delta:           +0x%zX.\n", adjusted_target_delta);
+            printf("[+]   Adjusted target virtual address:  0x%p.\n",
+              db.final_virtual_address + offset);
+
+            *target_delta = adjusted_target_delta;
+
             is_data_target = true;
             break;
           }
 
-          std::size_t pessimistic_distance = 0;
+          if (!is_data_target) {
+            std::size_t pessimistic_distance = 0;
 
-          // this is a very ROUGH estimate, but it gets the job done
-          for (std::size_t j = curr_cb_idx; j < code_blocks_.size(); ++j) {
-            auto const& target_cb = code_blocks_[j];
+            // this is a very ROUGH estimate, but it gets the job done
+            for (std::size_t j = curr_cb_idx; j < code_blocks_.size(); ++j) {
+              auto const& target_cb = code_blocks_[j];
 
-            pessimistic_distance += target_cb.expected_size;
+              pessimistic_distance += target_cb.expected_size;
 
-            if (target_virtual_offset >= target_cb.virtual_offset &&
-                target_virtual_offset < (target_cb.virtual_offset + target_cb.file_size))
-              break;
+              if (target_virtual_offset >= target_cb.virtual_offset &&
+                  target_virtual_offset < (target_cb.virtual_offset + target_cb.file_size))
+                break;
+            }
+
+            printf("[+]   Pessimistic target delta:        +0x%zX.\n", pessimistic_distance);
+
+            // TODO: need to encode an absolute target
+            if (pessimistic_distance >= INT_MAX) {
+              printf("[!] Pessimistic distance is too far.\n");
+              return false;
+            }
+
+            // TODO: calculate the target into the next code region
+            if (pessimistic_distance > remaining_region_size) {
+              printf("[!] Pessimistic target is outside of the current code region.\n");
+              return false;
+            }
+
+            *target_delta = pessimistic_distance;
           }
 
-          // TODO: need to encode an absolute target
-          if (pessimistic_distance >= INT_MAX) {
-            printf("[!] Pessimistic distance is too far.\n");
-            return false;
-          }
-
-          // TODO: calculate the target into the next code region
-          if (pessimistic_distance > remaining_region_size) {
-            printf("[!] Pessimistic target is outside of the current code region.\n");
-            return false;
-          }
-
-          *target_delta = pessimistic_distance;
+          printf("[+]   Target in data block:             %d.\n", is_data_target);
         }
 
         break;
@@ -514,7 +520,9 @@ private:
         // change the current (empty) code block into a relative code block
         cb->is_relative    = true;
         cb->file_size     += decoded_instruction.length;
-        cb->expected_size += decoded_instruction.length + 69;
+
+        // TODO: calculate a more accurate expected size
+        cb->expected_size += decoded_instruction.length + 32;
       }
     }
 
@@ -616,11 +624,6 @@ private:
   }
 
 private:
-  struct memory_region {
-    std::uint8_t* virtual_address;
-    std::size_t size;
-  };
-
 private:
   // zydis
   ZydisDecoder decoder_     = {};
@@ -650,9 +653,9 @@ private:
 int main() {
   chum_parser chum("./hello-world-x64.dll");
 
-  // add 0x2000 bytes of executable memory and 0x2000 bytes of read-write memory
-  chum.add_code_region(VirtualAlloc(nullptr, 0x2000, MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE), 0x2000);
-  chum.add_data_region(VirtualAlloc(nullptr, 0x2000, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE),         0x2000);
+  // add 0x4000 bytes of executable memory and 0x4000 bytes of read-write memory
+  chum.add_code_region(VirtualAlloc(nullptr, 0x4000, MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE), 0x4000);
+  chum.add_data_region(VirtualAlloc(nullptr, 0x4000, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE),         0x4000);
 
   if (!chum.write())
     printf("[!] Failed to write binary to memory.\n");

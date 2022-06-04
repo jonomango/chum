@@ -245,139 +245,33 @@ public:
       encoder_request.branch_type  = ZYDIS_BRANCH_TYPE_NONE;
       encoder_request.branch_width = ZYDIS_BRANCH_WIDTH_NONE;
 
-      // find the relative operand.
-      // determine if its forwards or backwards.
-      for (std::size_t i = 0; i < decoded_instruction.operand_count_visible; ++i) {
-        auto const& op = decoded_operands[i];
+      // get a pointer to the target delta of the current relative instruction
+      auto const curr_target_delta = get_instruction_target_delta(
+        &encoder_request, decoded_operands);
 
-        // the value that is added to RIP to get the target address
-        std::int64_t* target_delta = nullptr;
-
-        // memory references
-        if (op.type == ZYDIS_OPERAND_TYPE_MEMORY) {
-          // sanity check
-          assert(op.mem.disp.has_displacement);
-          assert(op.mem.base  == ZYDIS_REGISTER_RIP);
-          assert(op.mem.index == ZYDIS_REGISTER_NONE);
-          assert(op.mem.scale == 0);
-
-          target_delta = &encoder_request.operands[i].mem.displacement;
-        }
-        // relative CALLs, JMPs, etc
-        else if (op.type == ZYDIS_OPERAND_TYPE_IMMEDIATE && op.imm.is_relative)
-          target_delta = &encoder_request.operands[i].imm.s;
-        else
-          continue;
-
-        assert(target_delta != nullptr);
-
-        auto const target_virtual_offset = cb.virtual_offset +
-          decoded_instruction.length + *target_delta;
-
-        // TODO: fix targets into data regions immediately (even if they're forwards)
-
-        // backward targets can be fixed immediately
-        if (*target_delta < 0) {
-          printf("[+] Adjusting backwards target.\n");
-          printf("[+]   Target delta:                   -0x%zX.\n", -(*target_delta));
-          printf("[+]   Target virtual offset:           0x%zX.\n", target_virtual_offset);
-
-          for (std::size_t j = 0; j < curr_cb_idx; ++j) {
-            auto const& target_cb = code_blocks_[j];
-
-            if (target_virtual_offset < target_cb.virtual_offset ||
-                target_virtual_offset >= (target_cb.virtual_offset + target_cb.file_size))
-              continue;
-
-            auto const offset = (target_virtual_offset - target_cb.virtual_offset);
-
-            // the new target delta
-            auto const adjusted_target_delta = (curr_region.virtual_address +
-              curr_region_offset + decoded_instruction.length) -
-              (target_cb.final_virtual_address + offset);
-
-            printf("[+]   Adjusted target delta:          -0x%zX.\n",
-              adjusted_target_delta);
-            printf("[+]   Adjusted target virtual address: 0x%p.\n",
-              target_cb.final_virtual_address + offset);
-
-            char str[256];
-            disassemble_and_format(&file_buffer_[rva_to_file_offset(
-              static_cast<std::uint32_t>(target_virtual_offset))], 15, str, 256);
-            printf("[+]   Original target instruction:     %s.\n", str);
-
-            disassemble_and_format(target_cb.final_virtual_address + offset, 15, str, 256);
-            printf("[+]   Adjusted target instruction:     %s.\n", str);
-
-            *target_delta = -adjusted_target_delta;
-            break;
-          }
-        }
-        // forward targets need to be resolved later. for now, just estimate
-        // the instruction length for the worst case scenario.
-        else {
-          printf("[+] Estimating placeholder forwards target.\n");
-          printf("[+]   Target delta:                    +0x%zX.\n", *target_delta);
-          printf("[+]   Target virtual offset:            0x%zX.\n", target_virtual_offset);
-
-          bool is_data_target = false;
-
-          for (auto const& db : data_blocks_) {
-            if (target_virtual_offset < db.virtual_offset ||
-                target_virtual_offset >= (db.virtual_offset + db.virtual_size))
-              continue;
-
-            auto const offset = target_virtual_offset - db.virtual_offset;
-            auto const adjusted_target_delta = (curr_region.virtual_address +
-              curr_region_offset + decoded_instruction.length) - 
-              (db.final_virtual_address + offset);
-
-            printf("[+]   Adjusted target delta:           +0x%zX.\n", adjusted_target_delta);
-            printf("[+]   Adjusted target virtual address:  0x%p.\n",
-              db.final_virtual_address + offset);
-
-            *target_delta = adjusted_target_delta;
-
-            is_data_target = true;
-            break;
-          }
-
-          if (!is_data_target) {
-            std::size_t pessimistic_distance = 0;
-
-            // this is a very ROUGH estimate, but it gets the job done
-            for (std::size_t j = curr_cb_idx; j < code_blocks_.size(); ++j) {
-              auto const& target_cb = code_blocks_[j];
-
-              pessimistic_distance += target_cb.expected_size;
-
-              if (target_virtual_offset >= target_cb.virtual_offset &&
-                  target_virtual_offset < (target_cb.virtual_offset + target_cb.file_size))
-                break;
-            }
-
-            printf("[+]   Pessimistic target delta:        +0x%zX.\n", pessimistic_distance);
-
-            // TODO: need to encode an absolute target
-            if (pessimistic_distance >= INT_MAX) {
-              printf("[!] Pessimistic distance is too far.\n");
-              return false;
-            }
-
-            // TODO: calculate the target into the next code region
-            if (pessimistic_distance > remaining_region_size) {
-              printf("[!] Pessimistic target is outside of the current code region.\n");
-              return false;
-            }
-
-            *target_delta = pessimistic_distance;
-          }
-
-          printf("[+]   Target in data block:             %d.\n", is_data_target);
-        }
-
-        break;
+      if (!curr_target_delta) {
+        printf("[!] Failed to get instruction target delta.\n");
+        return false;
       }
+
+      std::int64_t adjusted_target_delta = 0;
+      bool fully_resolved = false;
+
+      // calculate the new adjusted target delta for the location
+      // where we are about to write this new instruction to.
+      if (!calculate_adjusted_target_delta(
+          curr_region.virtual_address + curr_region_offset,
+          curr_cb_idx,
+          cb.virtual_offset + decoded_instruction.length +
+            static_cast<std::int32_t>(*curr_target_delta),
+          adjusted_target_delta,
+          fully_resolved)) {
+        printf("[!] Failed to calculate adjusted target delta.\n");
+        return false;
+      }
+
+      if (fully_resolved)
+        *curr_target_delta = adjusted_target_delta - decoded_instruction.length;
 
       std::uint8_t new_instruction[ZYDIS_MAX_INSTRUCTION_LENGTH];
       std::size_t new_instruction_length = ZYDIS_MAX_INSTRUCTION_LENGTH;
@@ -389,6 +283,10 @@ public:
       if (ZYAN_FAILED(status)) {
         printf("[!] Failed to encode relative instruction.\n");
         return false;
+      }
+
+      if (new_instruction_length != decoded_instruction.length) {
+
       }
 
       if (new_instruction_length > remaining_region_size) {
@@ -579,6 +477,36 @@ private:
     return 0;
   }
 
+  // find the operand that causes an instruction to be "relative" and
+  // return a pointer to the operand's target delta.
+  static std::int64_t* get_instruction_target_delta(
+      ZydisEncoderRequest* const encoder_request,
+      ZydisDecodedOperand* const decoded_operands) {
+    // find the target delta, aka. the value that is added to RIP,
+    // which can be either an immediate value or a memory displacement.
+    for (std::size_t i = 0; i < encoder_request->operand_count; ++i) {
+      auto const& op = decoded_operands[i];
+
+      // memory references
+      if (op.type == ZYDIS_OPERAND_TYPE_MEMORY) {
+        assert(op.mem.disp.has_displacement);
+        assert(op.mem.base  == ZYDIS_REGISTER_RIP);
+        assert(op.mem.index == ZYDIS_REGISTER_NONE);
+        assert(op.mem.scale == 0);
+
+        return &encoder_request->operands[i].mem.displacement;
+      }
+      // relative CALLs, JMPs, etc
+      else if (op.type == ZYDIS_OPERAND_TYPE_IMMEDIATE && op.imm.is_relative) {
+        assert(op.imm.is_signed);
+
+        return &encoder_request->operands[i].imm.s;
+      }
+    }
+
+    return nullptr;
+  }
+
   // calculate the new target delta for a relative instruction. this new delta
   // is relative to the start of the current instruction, rather than the end.
   bool calculate_adjusted_target_delta(
@@ -601,9 +529,11 @@ private:
       auto const target_final_address = db.final_virtual_address +
         (target_virtual_offset - db.virtual_offset);
 
-      target_delta   = current_instruction_address - target_final_address;
+      target_delta   = target_final_address - current_instruction_address;
       fully_resolved = true;
 
+      printf("[+] Calculated data target delta: %c0x%zX.\n",
+        "+-"[target_delta < 0 ? 1 : 0], std::abs(target_delta));
       return true;
     }
 
@@ -624,15 +554,17 @@ private:
         auto const target_final_address = cb.final_virtual_address +
           (target_virtual_offset - cb.virtual_offset);
 
-        target_delta   = current_instruction_address - target_final_address;
+        target_delta   = target_final_address - current_instruction_address;
         fully_resolved = true;
 
+        printf("[+] Calculated backward target delta: %c0x%zX.\n",
+          "+-"[target_delta < 0 ? 1 : 0], std::abs(target_delta));
         return true;
       }
 
       // this is possible if the target isn't inside of any known code
       // blocks (i.e. we don't have complete code coverage).
-      printf("[!] Failed to calculate backwards target delta.\n");
+      printf("[!] Failed to calculate backward target delta.\n");
       return false;
     }
 
@@ -651,11 +583,14 @@ private:
           target_virtual_offset >= (cb.virtual_offset + cb.file_size))
         continue;
 
+      printf("[+] Calculated forward target delta: %c0x%zX.\n",
+        "+-"[target_delta < 0 ? 1 : 0], std::abs(target_delta));
       return true;
     }
 
     // this is possible if the target isn't inside of any known code
     // blocks (i.e. we don't have complete code coverage).
+    printf("[!] Failed to calculate forward target delta.\n");
     return false;
   }
 

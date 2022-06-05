@@ -5,11 +5,6 @@
 #include <queue>
 #include <Windows.h>
 
-  struct memory_region {
-    std::uint8_t* virtual_address;
-    std::size_t size;
-  };
-
 // TODO: make the code_block structure smaller. size fields can be a single
 //       byte each (they're RARELY that big, if ever) and if they happen to
 //       overflow, simply split the code block. the file offset can also be
@@ -53,6 +48,85 @@ struct data_block {
 
   // size of the data block in virtual memory
   std::uint32_t virtual_size;
+};
+
+struct memory_region {
+  std::uint8_t* virtual_address;
+  std::uint32_t size;
+};
+
+// a small utility class for writing instructions to code regions
+class code_region_writer {
+public:
+  // an empty vector may NOT be passed
+  code_region_writer(std::vector<memory_region>& regions)
+      : regions_(regions), current_region_(&regions[0]) {
+    assert(!regions.empty());
+  }
+
+  // try to write the specified buffer to the current region,
+  // or return false if there isn't enough space.
+  bool write(void const* const buffer, std::uint32_t const size) {
+    if (current_offset_ + size > current_region_->size)
+      return false;
+
+    memcpy(current_region_->virtual_address + current_offset_, buffer, size);
+    current_offset_ += size;
+
+    return true;
+  }
+
+  // try to write the specified buffer to the current region,
+  // or return false if there isn't enough space. if successful,
+  // cb.final_virtual_address and cb.final_size will be set accordingly.
+  bool write(void const* const buffer, std::uint32_t const size, code_block& cb) {
+    if (current_offset_ + size > current_region_->size)
+      return false;
+
+    cb.final_virtual_address = current_region_->virtual_address + current_offset_;
+    cb.final_size            = size;
+
+    memcpy(cb.final_virtual_address, buffer, size);
+    current_offset_ += size;
+
+    return true;
+  }
+
+  // try to write the specified buffer to the current region, possibly
+  // advancing to the next region is required. false is returned if
+  // there are no more regions to advance to. if successful,
+  // cb.final_virtual_address and cb.final_size will be set accordingly.
+  bool force_write(void const* const buffer, std::uint32_t const size, code_block& cb) {
+    while (!write(buffer, size, cb)) {
+      if (!advance())
+        return false;
+    }
+
+    return true;
+  }
+
+  // advance to the next region by encoding an unconditional jmp to the start
+  // of the next region. this function returns false if there are no more
+  // regions to advance to.
+  bool advance() {
+    // TODO: write this...
+    return false;
+  }
+
+  // get the address of the current instruction pointer
+  std::uint8_t* current_write_address() const {
+    return current_region_->virtual_address + current_offset_;
+  }
+
+private:
+  std::vector<memory_region>& regions_;
+
+  // the current region that we are writing to
+  std::size_t current_region_idx_ = 0;
+  memory_region* current_region_  = nullptr;
+
+  // the current write offset from the base of the current region
+  std::uint32_t current_offset_ = 0;
 };
 
 class chum_parser {
@@ -167,50 +241,28 @@ public:
     if (code_blocks_.empty())
       return true;
 
-    // index of the code region that we are currently writing to
-    std::size_t curr_region_idx = 0;
-
-    // current write offset into the current region
-    std::uint32_t curr_region_offset = 0;
-
     if (code_regions_.empty()) {
       printf("[!] No code regions provided.\n");
       return false;
     }
+
+    code_region_writer writer(code_regions_);
 
     for (std::size_t curr_cb_idx = 0; curr_cb_idx < code_blocks_.size(); ++curr_cb_idx) {
       auto& cb = code_blocks_[curr_cb_idx];
 
       print_code_block(cb);
 
-      // the current region we're writing to
-      auto const& curr_region = code_regions_[curr_region_idx];
-
-      // amount of space left in the current region
-      auto const remaining_region_size = (curr_region.size - curr_region_offset);
-
-      // non-relative instructions can be directly memcpy'd
-      // TODO: make a function for copying instruction bytes to the current
-      //       code region (and possibly proceeding to the next region if
-      //       there isn't enough space).
+      // non-relative instructions can be directly written
       if (!cb.is_relative) {
-        // TODO: account for the jmp stub size
-        if (cb.file_size > remaining_region_size) {
-          // TODO: write a jmp to the next region
-          printf("[!] Ran out of space in the current code region.\n");
+        if (!writer.force_write(&file_buffer_[cb.file_offset], cb.file_size, cb)) {
+          printf("[!] Not enough space in the provided code regions.\n");
           return false;
         }
-
-        cb.final_virtual_address = curr_region.virtual_address + curr_region_offset;
-        cb.final_size            = cb.file_size;
-
-        memcpy(curr_region.virtual_address + curr_region_offset,
-          &file_buffer_[cb.file_offset], cb.file_size);
 
         printf("[+] Copied 0x%X code bytes from +0x%X to 0x%p.\n",
           cb.file_size, cb.virtual_offset, cb.final_virtual_address);
 
-        curr_region_offset += cb.final_size;
         continue;
       }
 
@@ -241,37 +293,12 @@ public:
         return false;
       }
 
+      printf("[+]   branch_type  = %d.\n", encoder_request.branch_type);
+      printf("[+]   branch_width = %d.\n", encoder_request.branch_width);
+
       // we want the encoder to automatically use the smallest instruction available
       encoder_request.branch_type  = ZYDIS_BRANCH_TYPE_NONE;
       encoder_request.branch_width = ZYDIS_BRANCH_WIDTH_NONE;
-
-      // get a pointer to the target delta of the current relative instruction
-      auto const curr_target_delta = get_instruction_target_delta(
-        &encoder_request, decoded_operands);
-
-      if (!curr_target_delta) {
-        printf("[!] Failed to get instruction target delta.\n");
-        return false;
-      }
-
-      std::int64_t adjusted_target_delta = 0;
-      bool fully_resolved = false;
-
-      // calculate the new adjusted target delta for the location
-      // where we are about to write this new instruction to.
-      if (!calculate_adjusted_target_delta(
-          curr_region.virtual_address + curr_region_offset,
-          curr_cb_idx,
-          cb.virtual_offset + decoded_instruction.length +
-            static_cast<std::int32_t>(*curr_target_delta),
-          adjusted_target_delta,
-          fully_resolved)) {
-        printf("[!] Failed to calculate adjusted target delta.\n");
-        return false;
-      }
-
-      if (fully_resolved)
-        *curr_target_delta = adjusted_target_delta - decoded_instruction.length;
 
       std::uint8_t new_instruction[ZYDIS_MAX_INSTRUCTION_LENGTH];
       std::size_t new_instruction_length = ZYDIS_MAX_INSTRUCTION_LENGTH;
@@ -285,29 +312,23 @@ public:
         return false;
       }
 
-      if (new_instruction_length != decoded_instruction.length) {
-
-      }
-
-      if (new_instruction_length > remaining_region_size) {
-        printf("[!] Ran out of space in the current code region.\n");
+      if (!writer.force_write(new_instruction, new_instruction_length, cb)) {
+        printf("[!] Not enough space in the provided code regions.\n");
         return false;
       }
 
-      cb.final_virtual_address = curr_region.virtual_address + curr_region_offset;
-      cb.final_size            = static_cast<std::uint32_t>(new_instruction_length);
-
-      memcpy(curr_region.virtual_address + curr_region_offset,
-        new_instruction, new_instruction_length);
-      
-      printf("[+] Encoded a new relative instruction at 0x%p:\n",
+      printf("[+]   Encoded a new relative instruction at 0x%p:\n",
         cb.final_virtual_address);
       
+      printf("[+]    ");
+      for (std::size_t i = 0; i < new_instruction_length; ++i)
+        printf(" %.2X", new_instruction[i]);
+      for (std::size_t i = 0; i < (15 - new_instruction_length); ++i)
+        printf("   ");
+
       char str[256];
       disassemble_and_format(new_instruction, new_instruction_length, str, 256);
-      printf("[+]   %s.\n", str);
-
-      curr_region_offset += cb.final_size;
+      printf(" %s.\n", str);
     }
 
     printf("[+] # of code blocks: %zu (0x%zX bytes).\n",
@@ -317,14 +338,14 @@ public:
   }
 
   // memory where code will reside (X)
-  void add_code_region(void* const virtual_address, std::size_t const size) {
+  void add_code_region(void* const virtual_address, std::uint32_t const size) {
     code_regions_.push_back({ static_cast<std::uint8_t*>(virtual_address), size });
 
     // TODO: make sure the code regions are sorted
   }
 
   // memory where data will reside (RW)
-  void add_data_region(void* const virtual_address, std::size_t const size) {
+  void add_data_region(void* const virtual_address, std::uint32_t const size) {
     data_regions_.push_back({ static_cast<std::uint8_t*>(virtual_address), size });
   }
 

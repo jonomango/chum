@@ -3,7 +3,11 @@
 #include <vector>
 #include <fstream>
 #include <queue>
+#include <chrono>
 #include <Windows.h>
+
+#define CHUM_LOG_INFO(...) printf(__VA_ARGS__)
+#define CHUM_LOG_ERROR(...) printf(__VA_ARGS__)
 
 // TODO: make the code_block structure smaller. size fields can be a single
 //       byte each (they're RARELY that big, if ever) and if they happen to
@@ -134,13 +138,13 @@ public:
   chum_parser(char const* const file_path) {
     // initialize the decoder
     if (ZYAN_FAILED(ZydisDecoderInit(&decoder_, ZYDIS_MACHINE_MODE_LONG_64, ZYDIS_STACK_WIDTH_64))) {
-      printf("[!] Failed to initialize Zydis decoder.\n");
+      CHUM_LOG_ERROR("[!] Failed to initialize Zydis decoder.\n");
       return;
     }
 
     // initialize the formatter
     if (ZYAN_FAILED(ZydisFormatterInit(&formatter_, ZYDIS_FORMATTER_STYLE_INTEL))) {
-      printf("[!] Failed to initialize Zydis formatter.\n");
+      CHUM_LOG_ERROR("[!] Failed to initialize Zydis formatter.\n");
       return;
     }
 
@@ -150,7 +154,7 @@ public:
 
     file_buffer_ = read_file_to_buffer(file_path);
     if (file_buffer_.empty()) {
-      printf("[!] Failed to read file.\n");
+      CHUM_LOG_ERROR("[!] Failed to read file.\n");
       return;
     }
 
@@ -165,24 +169,25 @@ public:
     runtime_funcs_count_ = exception_dir.Size / sizeof(RUNTIME_FUNCTION);
 
     if (!parse())
-      printf("[!] Failed to parse binary.\n");
+      CHUM_LOG_ERROR("[!] Failed to parse binary.\n");
   }
 
   // write the new binary to memory
   bool write() {
     if (!write_data_blocks()) {
-      printf("[!] Failed to write data blocks to memory.\n");
+      CHUM_LOG_ERROR("[!] Failed to write data blocks to memory.\n");
       return false;
     }
 
     if (!write_code_blocks()) {
-      printf("[!] Failed to write code blocks to memory.\n");
+      CHUM_LOG_ERROR("[!] Failed to write code blocks to memory.\n");
       return false;
     }
 
     return true;
   }
 
+  // write each data block to the provided data regions
   bool write_data_blocks() {
     if (data_blocks_.empty())
       return true;
@@ -195,7 +200,7 @@ public:
     std::uint32_t curr_region_offset = 0;
 
     if (data_regions_.empty()) {
-      printf("[!] No data regions provided.\n");
+      CHUM_LOG_ERROR("[!] No data regions provided.\n");
       return false;
     }
 
@@ -207,7 +212,7 @@ public:
       auto const remaining_region_size = (curr_region.size - curr_region_offset);
 
       if (db.virtual_size > remaining_region_size) {
-        printf("[!] Ran out of space in the current data region.\n");
+        CHUM_LOG_ERROR("[!] Ran out of space in the current data region.\n");
         return false;
       }
 
@@ -222,7 +227,7 @@ public:
 
         memcpy(db.final_virtual_address, &file_buffer_[db.file_offset], size);
 
-        printf("[+] Copied 0x%X data bytes from +0x%X to 0x%p.\n",
+        CHUM_LOG_INFO("[+] Copied 0x%X data bytes from +0x%X to 0x%p.\n",
           size, db.virtual_offset, db.final_virtual_address);
       }
 
@@ -231,18 +236,20 @@ public:
       // TODO: align the current region offset
     }
 
-    printf("[+] # of data blocks: %zu (0x%zX bytes).\n",
+    CHUM_LOG_INFO("[+] # of data blocks: %zu (0x%zX bytes).\n",
       data_blocks_.size(), data_blocks_.size() * sizeof(data_block));
 
     return true;
   }
 
+  // write every code block to the provided code regions (while fixing up
+  // relative instructions and other annoying things)
   bool write_code_blocks() {
     if (code_blocks_.empty())
       return true;
 
     if (code_regions_.empty()) {
-      printf("[!] No code regions provided.\n");
+      CHUM_LOG_ERROR("[!] No code regions provided.\n");
       return false;
     }
 
@@ -253,14 +260,14 @@ public:
 
       print_code_block(cb);
 
-      // non-relative instructions can be directly written
+      // non-relative instructions can be directly copied
       if (!cb.is_relative) {
         if (!writer.force_write(&file_buffer_[cb.file_offset], cb.file_size, cb)) {
-          printf("[!] Not enough space in the provided code regions.\n");
+          CHUM_LOG_ERROR("[!] Not enough space in the provided code regions.\n");
           return false;
         }
 
-        printf("[+] Copied 0x%X code bytes from +0x%X to 0x%p.\n",
+        CHUM_LOG_INFO("[+] Copied 0x%X code bytes from +0x%X to 0x%p.\n",
           cb.file_size, cb.virtual_offset, cb.final_virtual_address);
 
         continue;
@@ -276,7 +283,7 @@ public:
         ZYDIS_DFLAG_VISIBLE_OPERANDS_ONLY);
 
       if (ZYAN_FAILED(status)) {
-        printf("[!] Failed to decode instruction. Status = 0x%X.\n", status);
+        CHUM_LOG_ERROR("[!] Failed to decode instruction. Status = 0x%X.\n", status);
         return false;
       }
 
@@ -289,12 +296,12 @@ public:
         decoded_operands, decoded_instruction.operand_count_visible, &encoder_request);
 
       if (ZYAN_FAILED(status)) {
-        printf("[!] Failed to create encoder request. Status = 0x%X.\n", status);
+        CHUM_LOG_ERROR("[!] Failed to create encoder request. Status = 0x%X.\n", status);
         return false;
       }
 
-      printf("[+]   branch_type  = %d.\n", encoder_request.branch_type);
-      printf("[+]   branch_width = %d.\n", encoder_request.branch_width);
+      CHUM_LOG_INFO("[+]   branch_type  = %d.\n", encoder_request.branch_type);
+      CHUM_LOG_INFO("[+]   branch_width = %d.\n", encoder_request.branch_width);
 
       // we want the encoder to automatically use the smallest instruction available
       encoder_request.branch_type  = ZYDIS_BRANCH_TYPE_NONE;
@@ -308,30 +315,31 @@ public:
         new_instruction, &new_instruction_length);
 
       if (ZYAN_FAILED(status)) {
-        printf("[!] Failed to encode relative instruction.\n");
+        CHUM_LOG_ERROR("[!] Failed to encode relative instruction.\n");
         return false;
       }
 
-      if (!writer.force_write(new_instruction, new_instruction_length, cb)) {
-        printf("[!] Not enough space in the provided code regions.\n");
+      if (!writer.force_write(new_instruction,
+          static_cast<std::uint32_t>(new_instruction_length), cb)) {
+        CHUM_LOG_ERROR("[!] Not enough space in the provided code regions.\n");
         return false;
       }
 
-      printf("[+]   Encoded a new relative instruction at 0x%p:\n",
+      CHUM_LOG_INFO("[+]   Encoded a new relative instruction at 0x%p:\n",
         cb.final_virtual_address);
       
-      printf("[+]    ");
+      CHUM_LOG_INFO("[+]    ");
       for (std::size_t i = 0; i < new_instruction_length; ++i)
-        printf(" %.2X", new_instruction[i]);
+        CHUM_LOG_INFO(" %.2X", new_instruction[i]);
       for (std::size_t i = 0; i < (15 - new_instruction_length); ++i)
-        printf("   ");
+        CHUM_LOG_INFO("   ");
 
       char str[256];
       disassemble_and_format(new_instruction, new_instruction_length, str, 256);
-      printf(" %s.\n", str);
+      CHUM_LOG_INFO(" %s.\n", str);
     }
 
-    printf("[+] # of code blocks: %zu (0x%zX bytes).\n",
+    CHUM_LOG_INFO("[+] # of code blocks: %zu (0x%zX bytes).\n",
       code_blocks_.size(), code_blocks_.size() * sizeof(code_block));
 
     return true;
@@ -394,8 +402,21 @@ private:
         // this *really* shouldn't happen but it isn't a fatal error... just
         // ignore any possible remaining instructions in the block.
         if (ZYAN_FAILED(status)) {
-          printf("[!] Failed to decode instruction! Virtual offset: 0x%X. Status: 0x%X.\n",
-            block_virt_offset + instruction_offset, status);
+          CHUM_LOG_ERROR("[!] Failed to decode instruction!\n");
+          CHUM_LOG_ERROR("[!]   Status:               0x%X.\n", status);
+          CHUM_LOG_ERROR("[!]   Instruction offset:   0x%X.\n", instruction_offset);
+          CHUM_LOG_ERROR("[!]   Block virtual offset: 0x%X.\n", block_virt_offset);
+          CHUM_LOG_ERROR("[!]   Block size:           0x%X.\n", block_size);
+          CHUM_LOG_ERROR("[!]   Block index:          %zu.\n", i);
+
+          // TODO: directly add the rest of the instructions to the current
+          //       (non-relative) code block. it is very likely that we are
+          //       dealing with data that has been appended to a function,
+          //       and we need to be careful to not throw it away.
+          // 
+          // cb->file_size  += remaining_size;
+          // cb->final_size += remaining_size;
+
           break;
         }
 
@@ -553,7 +574,7 @@ private:
       target_delta   = target_final_address - current_instruction_address;
       fully_resolved = true;
 
-      printf("[+] Calculated data target delta: %c0x%zX.\n",
+      CHUM_LOG_INFO("[+] Calculated data target delta: %c0x%zX.\n",
         "+-"[target_delta < 0 ? 1 : 0], std::abs(target_delta));
       return true;
     }
@@ -578,14 +599,14 @@ private:
         target_delta   = target_final_address - current_instruction_address;
         fully_resolved = true;
 
-        printf("[+] Calculated backward target delta: %c0x%zX.\n",
+        CHUM_LOG_INFO("[+] Calculated backward target delta: %c0x%zX.\n",
           "+-"[target_delta < 0 ? 1 : 0], std::abs(target_delta));
         return true;
       }
 
       // this is possible if the target isn't inside of any known code
       // blocks (i.e. we don't have complete code coverage).
-      printf("[!] Failed to calculate backward target delta.\n");
+      CHUM_LOG_ERROR("[!] Failed to calculate backward target delta.\n");
       return false;
     }
 
@@ -604,14 +625,14 @@ private:
           target_virtual_offset >= (cb.virtual_offset + cb.file_size))
         continue;
 
-      printf("[+] Calculated forward target delta: %c0x%zX.\n",
+      CHUM_LOG_INFO("[+] Calculated forward target delta: %c0x%zX.\n",
         "+-"[target_delta < 0 ? 1 : 0], std::abs(target_delta));
       return true;
     }
 
     // this is possible if the target isn't inside of any known code
     // blocks (i.e. we don't have complete code coverage).
-    printf("[!] Failed to calculate forward target delta.\n");
+    CHUM_LOG_ERROR("[!] Failed to calculate forward target delta.\n");
     return false;
   }
 
@@ -630,17 +651,17 @@ private:
   }
 
   void print_code_block(code_block const& cb) const {
-    printf("[+] Code block:\n");
+    CHUM_LOG_INFO("[+] Code block:\n");
 
-    printf("[+]   is_relative    = %d.\n", cb.is_relative);
-    printf("[+]   virtual_offset = 0x%X.\n", cb.virtual_offset);
-    printf("[+]   file_offset    = 0x%X.\n", cb.file_offset);
-    printf("[+]   file_size      = 0x%X.\n", cb.file_size);
+    CHUM_LOG_INFO("[+]   is_relative    = %d.\n", cb.is_relative);
+    CHUM_LOG_INFO("[+]   virtual_offset = 0x%X.\n", cb.virtual_offset);
+    CHUM_LOG_INFO("[+]   file_offset    = 0x%X.\n", cb.file_offset);
+    CHUM_LOG_INFO("[+]   file_size      = 0x%X.\n", cb.file_size);
 
     if (cb.is_relative)
-      printf("[+]   expected_size  = 0x%X.\n", cb.final_size);
+      CHUM_LOG_INFO("[+]   expected_size  = 0x%X.\n", cb.final_size);
 
-    printf("[+]   instructions:\n");
+    CHUM_LOG_INFO("[+]   instructions:\n");
 
     std::size_t offset = 0;
     while (offset < cb.file_size) {
@@ -648,12 +669,12 @@ private:
       auto const length = disassemble_and_format(
         &file_buffer_[cb.file_offset + offset], cb.file_size - offset, str, 256);
       
-      printf("[+]    ");
+      CHUM_LOG_INFO("[+]    ");
       for (std::size_t i = 0; i < length; ++i)
-        printf(" %.2X", file_buffer_[cb.file_offset + offset + i]);
+        CHUM_LOG_INFO(" %.2X", file_buffer_[cb.file_offset + offset + i]);
       for (std::size_t i = 0; i < (15 - length); ++i)
-        printf("   ");
-      printf(" %s.\n", str);
+        CHUM_LOG_INFO("   ");
+      CHUM_LOG_INFO(" %s.\n", str);
 
       offset += length;
     }
@@ -686,12 +707,19 @@ private:
 };
 
 int main() {
+  auto const start_time = std::chrono::high_resolution_clock::now();
+
   chum_parser chum("./hello-world-x64.dll");
+  //chum_parser chum("C:/Windows/system32/kernel32.dll");
 
   // add 0x4000 bytes of executable memory and 0x4000 bytes of read-write memory
   chum.add_code_region(VirtualAlloc(nullptr, 0x4000, MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE), 0x4000);
   chum.add_data_region(VirtualAlloc(nullptr, 0x4000, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE),         0x4000);
 
   if (!chum.write())
-    printf("[!] Failed to write binary to memory.\n");
+    CHUM_LOG_ERROR("[!] Failed to write binary to memory.\n");
+
+  auto const end_time = std::chrono::high_resolution_clock::now();
+
+  CHUM_LOG_INFO("[+] Time elapsed: %zums\n", std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time).count());
 }

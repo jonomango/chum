@@ -6,7 +6,9 @@
 #include <chrono>
 #include <Windows.h>
 
-#define CHUM_LOG_INFO(...) (void)0//printf(__VA_ARGS__)
+#define CHUM_LOG_SPAM(...) (void)0 //printf(__VA_ARGS__)
+#define CHUM_LOG_INFO(...) printf(__VA_ARGS__)
+#define CHUM_LOG_WARNING(...) (void)0 //printf(__VA_ARGS__)
 #define CHUM_LOG_ERROR(...) printf(__VA_ARGS__)
 
 // TODO: make the code_block structure smaller. size fields can be a single
@@ -227,7 +229,7 @@ public:
 
         memcpy(db.final_virtual_address, &file_buffer_[db.file_offset], size);
 
-        CHUM_LOG_INFO("[+] Copied 0x%X data bytes from +0x%X to 0x%p.\n",
+        CHUM_LOG_INFO("[+] Copied 0x%.6X data bytes from +0x%.8X to 0x%p.\n",
           size, db.virtual_offset, db.final_virtual_address);
       }
 
@@ -235,9 +237,6 @@ public:
 
       // TODO: align the current region offset
     }
-
-    CHUM_LOG_INFO("[+] # of data blocks: %zu (0x%zX bytes).\n",
-      data_blocks_.size(), data_blocks_.size() * sizeof(data_block));
 
     return true;
   }
@@ -267,7 +266,7 @@ public:
           return false;
         }
 
-        CHUM_LOG_INFO("[+] Copied 0x%X code bytes from +0x%X to 0x%p.\n",
+        CHUM_LOG_SPAM("[+] Copied 0x%X code bytes from +0x%X to 0x%p.\n",
           cb.file_size, cb.virtual_offset, cb.final_virtual_address);
 
         continue;
@@ -305,11 +304,11 @@ public:
 
       // branch instructions
       if (decoded_instruction.meta.branch_type != ZYDIS_BRANCH_TYPE_NONE) {
-        print_code_block(cb);
+        //print_code_block(cb);
 
-        CHUM_LOG_INFO("[+] Fixing branch instruction.\n");
-        CHUM_LOG_INFO("[+]   Branch type  = %d.\n", encoder_request.branch_type);
-        CHUM_LOG_INFO("[+]   Branch width = %d.\n", encoder_request.branch_width);
+        CHUM_LOG_SPAM("[+] Fixing branch instruction.\n");
+        CHUM_LOG_SPAM("[+]   Branch type  = %d.\n", encoder_request.branch_type);
+        CHUM_LOG_SPAM("[+]   Branch width = %d.\n", encoder_request.branch_width);
 
         auto const delta_ptr = get_instruction_target_delta(&encoder_request, decoded_operands);
 
@@ -365,22 +364,9 @@ public:
         return false;
       }
 
-      CHUM_LOG_INFO("[+] Encoded a new relative instruction at 0x%p:\n",
+      CHUM_LOG_SPAM("[+] Encoded a new relative instruction at 0x%p:\n",
         cb.final_virtual_address);
-      
-      CHUM_LOG_INFO("[+]  ");
-      for (std::size_t i = 0; i < new_instruction_length; ++i)
-        CHUM_LOG_INFO(" %.2X", new_instruction[i]);
-      for (std::size_t i = 0; i < (15 - new_instruction_length); ++i)
-        CHUM_LOG_INFO("   ");
-
-      char str[256];
-      disassemble_and_format(new_instruction, new_instruction_length, str, 256);
-      CHUM_LOG_INFO(" %s.\n", str);
     }
-
-    CHUM_LOG_INFO("[+] # of code blocks: %zu (0x%zX bytes).\n",
-      code_blocks_.size(), code_blocks_.size() * sizeof(code_block));
 
     return true;
   }
@@ -402,6 +388,8 @@ private:
   bool parse() {
     // TODO: add external references to code blocks that are not covered by
     //       exception directory.
+
+    std::size_t decoded_instruction_count = 0;
 
     // disassemble every function and create a list of code blocks
     for (std::size_t i = 0; i < runtime_funcs_count_; ++i) {
@@ -433,32 +421,7 @@ private:
         auto const buffer_curr_instruction = &file_buffer_[block_file_offset + instruction_offset];
         auto const remaining_size = (block_size - instruction_offset);
 
-        // decode the current instruction
-        auto const status = ZydisDecoderDecodeInstruction(&decoder_, nullptr,
-          buffer_curr_instruction, remaining_size, &decoded_instruction);
-        
-        // this *really* shouldn't happen but it isn't a fatal error... just
-        // ignore any possible remaining instructions in the block.
-        if (ZYAN_FAILED(status)) {
-          CHUM_LOG_ERROR("[!] Failed to decode instruction!\n");
-          CHUM_LOG_ERROR("[!]   Status:               0x%X.\n", status);
-          CHUM_LOG_ERROR("[!]   Instruction offset:   0x%X.\n", instruction_offset);
-          CHUM_LOG_ERROR("[!]   Block virtual offset: 0x%X.\n", block_virt_offset);
-          CHUM_LOG_ERROR("[!]   Block size:           0x%X.\n", block_size);
-          CHUM_LOG_ERROR("[!]   Block index:          %zu.\n", i);
-
-          // TODO: directly add the rest of the instructions to the current
-          //       (non-relative) code block. it is very likely that we are
-          //       dealing with data that has been appended to a function,
-          //       and we need to be careful to not throw it away.
-          // 
-          // cb->file_size  += remaining_size;
-          // cb->final_size += remaining_size;
-
-          break;
-        }
-
-        // if the current code block is relative, we need to create a new, empty, non-relative one
+        // if the current code block is relative, we need to start a new, empty, non-relative one
         if (cb->is_relative) {
           cb = &code_blocks_.emplace_back();
           cb->is_relative = false;
@@ -470,6 +433,32 @@ private:
           cb->file_offset    = block_file_offset + instruction_offset;
           cb->file_size      = 0;
         }
+
+        // decode the current instruction
+        auto const status = ZydisDecoderDecodeInstruction(&decoder_, nullptr,
+          buffer_curr_instruction, remaining_size, &decoded_instruction);
+        
+        // this *really* shouldn't happen but it isn't a fatal error... just
+        // ignore any possible remaining instructions in the block.
+        if (ZYAN_FAILED(status)) {
+          CHUM_LOG_WARNING("[!] Failed to decode instruction!\n");
+          CHUM_LOG_WARNING("[!]   Status:               0x%X.\n", status);
+          CHUM_LOG_WARNING("[!]   Instruction offset:   0x%X.\n", instruction_offset);
+          CHUM_LOG_WARNING("[!]   Block virtual offset: 0x%X.\n", block_virt_offset);
+          CHUM_LOG_WARNING("[!]   Block size:           0x%X.\n", block_size);
+          CHUM_LOG_WARNING("[!]   Block index:          %zu.\n", i);
+
+          // TODO: directly add the rest of the instructions to the current
+          //       (non-relative) code block. it is very likely that we are
+          //       dealing with data that has been appended to a function,
+          //       and we need to be careful to not throw it away.
+          cb->file_size  += remaining_size;
+          cb->final_size += remaining_size;
+
+          break;
+        }
+
+        ++decoded_instruction_count;
 
         // non-relative instructions (these can simply be memcpy'd to memory)
         if (!(decoded_instruction.attributes & ZYDIS_ATTRIB_IS_RELATIVE)) {
@@ -523,6 +512,15 @@ private:
 
       data_blocks_.push_back(block);
     }
+
+    CHUM_LOG_INFO("[+] Number of runtime functions:    %zu.\n", runtime_funcs_count_);
+    CHUM_LOG_INFO("[+] Number of decoded instructions: %zu.\n", decoded_instruction_count);
+
+    CHUM_LOG_INFO("[+] Number of data blocks:          %zu (0x%zX bytes).\n",
+      data_blocks_.size(), data_blocks_.size() * sizeof(data_block));
+
+    CHUM_LOG_INFO("[+] Number of code blocks:          %zu (0x%zX bytes).\n",
+      code_blocks_.size(), code_blocks_.size() * sizeof(code_block));
 
     return true;
   }
@@ -612,7 +610,7 @@ private:
       target_delta   = target_final_address - current_instruction_address;
       fully_resolved = true;
 
-      CHUM_LOG_INFO("[+] Calculated data target delta: %c0x%zX.\n",
+      CHUM_LOG_SPAM("[+] Calculated data target delta: %c0x%zX.\n",
         "+-"[target_delta < 0 ? 1 : 0], std::abs(target_delta));
       return true;
     }
@@ -637,7 +635,7 @@ private:
         target_delta   = target_final_address - current_instruction_address;
         fully_resolved = true;
 
-        CHUM_LOG_INFO("[+] Calculated backward target delta: %c0x%zX.\n",
+        CHUM_LOG_SPAM("[+] Calculated backward target delta: %c0x%zX.\n",
           "+-"[target_delta < 0 ? 1 : 0], std::abs(target_delta));
         return true;
       }
@@ -657,13 +655,13 @@ private:
     for (std::size_t i = current_cb_idx; i < code_blocks_.size(); ++i) {
       auto const& cb = code_blocks_[i];
 
-      target_delta  += cb.expected_size;
+      target_delta += cb.expected_size;
 
       if (target_virtual_offset < cb.virtual_offset ||
           target_virtual_offset >= (cb.virtual_offset + cb.file_size))
         continue;
 
-      CHUM_LOG_INFO("[+] Calculated forward target delta: %c0x%zX.\n",
+      CHUM_LOG_SPAM("[+] Calculated forward target delta: %c0x%zX.\n",
         "+-"[target_delta < 0 ? 1 : 0], std::abs(target_delta));
       return true;
     }
@@ -689,17 +687,17 @@ private:
   }
 
   void print_code_block(code_block const& cb) const {
-    CHUM_LOG_INFO("[+] Code block:\n");
+    printf("[+] Code block:\n");
 
-    CHUM_LOG_INFO("[+]   is_relative    = %d.\n", cb.is_relative);
-    CHUM_LOG_INFO("[+]   virtual_offset = 0x%X.\n", cb.virtual_offset);
-    CHUM_LOG_INFO("[+]   file_offset    = 0x%X.\n", cb.file_offset);
-    CHUM_LOG_INFO("[+]   file_size      = 0x%X.\n", cb.file_size);
+    printf("[+]   is_relative    = %d.\n", cb.is_relative);
+    printf("[+]   virtual_offset = 0x%X.\n", cb.virtual_offset);
+    printf("[+]   file_offset    = 0x%X.\n", cb.file_offset);
+    printf("[+]   file_size      = 0x%X.\n", cb.file_size);
 
     if (cb.is_relative)
-      CHUM_LOG_INFO("[+]   expected_size  = 0x%X.\n", cb.final_size);
+      printf("[+]   expected_size  = 0x%X.\n", cb.final_size);
 
-    CHUM_LOG_INFO("[+]   instructions:\n");
+    printf("[+]   instructions:\n");
 
     std::size_t offset = 0;
     while (offset < cb.file_size) {
@@ -707,12 +705,12 @@ private:
       auto const length = disassemble_and_format(
         &file_buffer_[cb.file_offset + offset], cb.file_size - offset, str, 256);
       
-      CHUM_LOG_INFO("[+]    ");
+      printf("[+]    +%.3zX: ", offset);
       for (std::size_t i = 0; i < length; ++i)
-        CHUM_LOG_INFO(" %.2X", file_buffer_[cb.file_offset + offset + i]);
+        printf(" %.2X", file_buffer_[cb.file_offset + offset + i]);
       for (std::size_t i = 0; i < (15 - length); ++i)
-        CHUM_LOG_INFO("   ");
-      CHUM_LOG_INFO(" %s.\n", str);
+        printf("   ");
+      printf(" %s.\n", str);
 
       offset += length;
     }
@@ -747,20 +745,18 @@ private:
 int main() {
   auto const start_time = std::chrono::high_resolution_clock::now();
 
-  //chum_parser chum("C:/Windows/system32/ntoskrnl.exe");
-  //chum.add_code_region(VirtualAlloc(nullptr, 0x100'000, MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE), 0x100'000);
-  //chum.add_data_region(VirtualAlloc(nullptr, 0x100'000, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE),         0x100'000);
+  chum_parser chum("C:/Windows/system32/ntoskrnl.exe");
+  chum.add_code_region(VirtualAlloc(nullptr, 0x1'000'000, MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE), 0x1'000'000);
+  chum.add_data_region(VirtualAlloc(nullptr, 0x1'000'000, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE),         0x1'000'000);
 
-  chum_parser chum("./hello-world-x64.dll");
-
-  // add 0x4000 bytes of executable memory and 0x4000 bytes of read-write memory
-  chum.add_code_region(VirtualAlloc(nullptr, 0x4000, MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE), 0x4000);
-  chum.add_data_region(VirtualAlloc(nullptr, 0x4000, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE),         0x4000);
+  //chum_parser chum("./hello-world-x64.dll");
+  //chum.add_code_region(VirtualAlloc(nullptr, 0x4000, MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE), 0x4000);
+  //chum.add_data_region(VirtualAlloc(nullptr, 0x4000, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE),         0x4000);
 
   if (!chum.write())
     CHUM_LOG_ERROR("[!] Failed to write binary to memory.\n");
 
   auto const end_time = std::chrono::high_resolution_clock::now();
 
-  printf("[+] Time elapsed: %zums\n", std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time).count());
+  CHUM_LOG_INFO("[+] Time elapsed: %zums\n", std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time).count());
 }

@@ -6,7 +6,7 @@
 #include <chrono>
 #include <Windows.h>
 
-#define CHUM_LOG_INFO(...) printf(__VA_ARGS__)
+#define CHUM_LOG_INFO(...) (void)0//printf(__VA_ARGS__)
 #define CHUM_LOG_ERROR(...) printf(__VA_ARGS__)
 
 // TODO: make the code_block structure smaller. size fields can be a single
@@ -258,7 +258,7 @@ public:
     for (std::size_t curr_cb_idx = 0; curr_cb_idx < code_blocks_.size(); ++curr_cb_idx) {
       auto& cb = code_blocks_[curr_cb_idx];
 
-      print_code_block(cb);
+      //print_code_block(cb);
 
       // non-relative instructions can be directly copied
       if (!cb.is_relative) {
@@ -300,22 +300,62 @@ public:
         return false;
       }
 
-      CHUM_LOG_INFO("[+]   branch_type  = %d.\n", encoder_request.branch_type);
-      CHUM_LOG_INFO("[+]   branch_width = %d.\n", encoder_request.branch_width);
-
-      // we want the encoder to automatically use the smallest instruction available
-      encoder_request.branch_type  = ZYDIS_BRANCH_TYPE_NONE;
-      encoder_request.branch_width = ZYDIS_BRANCH_WIDTH_NONE;
-
       std::uint8_t new_instruction[ZYDIS_MAX_INSTRUCTION_LENGTH];
       std::size_t new_instruction_length = ZYDIS_MAX_INSTRUCTION_LENGTH;
 
-      // encode the new "fixed" relative instruction
-      status = ZydisEncoderEncodeInstruction(&encoder_request,
-        new_instruction, &new_instruction_length);
+      // branch instructions
+      if (decoded_instruction.meta.branch_type != ZYDIS_BRANCH_TYPE_NONE) {
+        print_code_block(cb);
+
+        CHUM_LOG_INFO("[+] Fixing branch instruction.\n");
+        CHUM_LOG_INFO("[+]   Branch type  = %d.\n", encoder_request.branch_type);
+        CHUM_LOG_INFO("[+]   Branch width = %d.\n", encoder_request.branch_width);
+
+        auto const delta_ptr = get_instruction_target_delta(&encoder_request, decoded_operands);
+
+        // delta from start of instruction
+        std::int64_t delta = *delta_ptr + decoded_instruction.length;
+
+        // this is (hopefully) the size of the instruction, minus the size of
+        // the immediate operand.
+        std::size_t predicted_instruction_length = decoded_instruction.length -
+          (decoded_instruction.meta.branch_type == ZYDIS_BRANCH_TYPE_NEAR ? 1 : 4);
+
+        // TODO: make sure we're only fixing imm branches
+
+        // encode absolute branch
+        if (delta > (0x7FFF'FFFFll + 5)) {
+          CHUM_LOG_ERROR("[!] Absolute branches not handled yet.\n");
+          return false;
+        }
+        // encode near branch
+        else if (delta > (0x7Fll + 2)) {
+          //encoder_request.branch_type  = ZYDIS_BRANCH_TYPE_NEAR;
+        }
+        // encode short branch
+        else {
+          //encoder_request.branch_type  = ZYDIS_BRANCH_TYPE_SHORT;
+        }
+
+        // im still not sure what this field is used for so im just ignoring it...
+        encoder_request.branch_width = ZYDIS_BRANCH_WIDTH_NONE;
+
+        status = ZydisEncoderEncodeInstruction(&encoder_request,
+          new_instruction, &new_instruction_length);
+
+        //if (new_instruction_length != decoded_instruction.length) {
+          //CHUM_LOG_ERROR("[!] Failed to correctly predict branch instruction length.\n");
+          //return false;
+        //}
+      }
+      // memory accesses (probably)
+      else {
+        status = ZydisEncoderEncodeInstruction(&encoder_request,
+          new_instruction, &new_instruction_length);
+      }
 
       if (ZYAN_FAILED(status)) {
-        CHUM_LOG_ERROR("[!] Failed to encode relative instruction.\n");
+        CHUM_LOG_ERROR("[!] Failed to encode relative instruction. Status: 0x%X.\n", status);
         return false;
       }
 
@@ -325,10 +365,10 @@ public:
         return false;
       }
 
-      CHUM_LOG_INFO("[+]   Encoded a new relative instruction at 0x%p:\n",
+      CHUM_LOG_INFO("[+] Encoded a new relative instruction at 0x%p:\n",
         cb.final_virtual_address);
       
-      CHUM_LOG_INFO("[+]    ");
+      CHUM_LOG_INFO("[+]  ");
       for (std::size_t i = 0; i < new_instruction_length; ++i)
         CHUM_LOG_INFO(" %.2X", new_instruction[i]);
       for (std::size_t i = 0; i < (15 - new_instruction_length); ++i)
@@ -373,7 +413,6 @@ private:
       auto const block_size        = (runtime_func.EndAddress - runtime_func.BeginAddress);
 
       ZydisDecodedInstruction decoded_instruction;
-      ZydisDecodedOperand decoded_operands[ZYDIS_MAX_OPERAND_COUNT_VISIBLE];
 
       // create a new code block
       auto cb = &code_blocks_.emplace_back();
@@ -395,9 +434,8 @@ private:
         auto const remaining_size = (block_size - instruction_offset);
 
         // decode the current instruction
-        auto const status = ZydisDecoderDecodeFull(&decoder_, buffer_curr_instruction,
-          remaining_size, &decoded_instruction, decoded_operands,
-          ZYDIS_MAX_OPERAND_COUNT_VISIBLE, ZYDIS_DFLAG_VISIBLE_OPERANDS_ONLY);
+        auto const status = ZydisDecoderDecodeInstruction(&decoder_, nullptr,
+          buffer_curr_instruction, remaining_size, &decoded_instruction);
         
         // this *really* shouldn't happen but it isn't a fatal error... just
         // ignore any possible remaining instructions in the block.
@@ -709,8 +747,11 @@ private:
 int main() {
   auto const start_time = std::chrono::high_resolution_clock::now();
 
+  //chum_parser chum("C:/Windows/system32/ntoskrnl.exe");
+  //chum.add_code_region(VirtualAlloc(nullptr, 0x100'000, MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE), 0x100'000);
+  //chum.add_data_region(VirtualAlloc(nullptr, 0x100'000, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE),         0x100'000);
+
   chum_parser chum("./hello-world-x64.dll");
-  //chum_parser chum("C:/Windows/system32/kernel32.dll");
 
   // add 0x4000 bytes of executable memory and 0x4000 bytes of read-write memory
   chum.add_code_region(VirtualAlloc(nullptr, 0x4000, MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE), 0x4000);
@@ -721,5 +762,5 @@ int main() {
 
   auto const end_time = std::chrono::high_resolution_clock::now();
 
-  CHUM_LOG_INFO("[+] Time elapsed: %zums\n", std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time).count());
+  printf("[+] Time elapsed: %zums\n", std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time).count());
 }

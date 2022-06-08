@@ -257,8 +257,6 @@ public:
     for (std::size_t curr_cb_idx = 0; curr_cb_idx < code_blocks_.size(); ++curr_cb_idx) {
       auto& cb = code_blocks_[curr_cb_idx];
 
-      //print_code_block(cb);
-
       // non-relative instructions can be directly copied
       if (!cb.is_relative) {
         if (!writer.force_write(&file_buffer_[cb.file_offset], cb.file_size, cb)) {
@@ -276,10 +274,9 @@ public:
       ZydisDecodedOperand decoded_operands[ZYDIS_MAX_OPERAND_COUNT_VISIBLE];
 
       // decode the current instruction
-      auto status = ZydisDecoderDecodeFull(&decoder_,
-        &file_buffer_[cb.file_offset], cb.file_size, &decoded_instruction,
-        decoded_operands, ZYDIS_MAX_OPERAND_COUNT_VISIBLE,
-        ZYDIS_DFLAG_VISIBLE_OPERANDS_ONLY);
+      auto status = ZydisDecoderDecodeFull(&decoder_, &file_buffer_[cb.file_offset],
+          cb.file_size, &decoded_instruction, decoded_operands,
+          ZYDIS_MAX_OPERAND_COUNT_VISIBLE, ZYDIS_DFLAG_VISIBLE_OPERANDS_ONLY);
 
       if (ZYAN_FAILED(status)) {
         CHUM_LOG_ERROR("[!] Failed to decode instruction. Status = 0x%X.\n", status);
@@ -303,49 +300,77 @@ public:
       std::size_t new_instruction_length = ZYDIS_MAX_INSTRUCTION_LENGTH;
 
       // branch instructions
-      if (decoded_instruction.meta.branch_type != ZYDIS_BRANCH_TYPE_NONE) {
+      if (decoded_instruction.meta.branch_type != ZYDIS_BRANCH_TYPE_NONE && !(decoded_instruction.attributes & ZYDIS_ATTRIB_HAS_MODRM)) {
         //print_code_block(cb);
 
-        CHUM_LOG_SPAM("[+] Fixing branch instruction.\n");
-        CHUM_LOG_SPAM("[+]   Branch type  = %d.\n", encoder_request.branch_type);
-        CHUM_LOG_SPAM("[+]   Branch width = %d.\n", encoder_request.branch_width);
+        //CHUM_LOG_INFO("[+] Fixing branch instruction.\n");
+        //CHUM_LOG_INFO("[+]   Branch type      = %d.\n", encoder_request.branch_type);
+        //CHUM_LOG_INFO("[+]   Branch width     = %d.\n", encoder_request.branch_width);
+        //CHUM_LOG_INFO("[+]   Catagory type    = %d.\n", decoded_instruction.meta.category);
 
         auto const delta_ptr = get_instruction_target_delta(&encoder_request, decoded_operands);
 
         // delta from start of instruction
         std::int64_t delta = *delta_ptr + decoded_instruction.length;
 
-        // this is (hopefully) the size of the instruction, minus the size of
-        // the immediate operand.
-        std::size_t predicted_instruction_length = decoded_instruction.length -
-          (decoded_instruction.meta.branch_type == ZYDIS_BRANCH_TYPE_NEAR ? 1 : 4);
+        assert(decoded_instruction.meta.branch_type != ZYDIS_BRANCH_TYPE_FAR);
 
-        // TODO: make sure we're only fixing imm branches
+        // this is the number of prefixes that the new instruction will have
+        std::int64_t const prefix_count = __popcnt64(encoder_request.prefixes);
 
-        // encode absolute branch
-        if (delta > (0x7FFF'FFFFll + 5)) {
+        // this is just used to check if we correctly predicted the instruction length
+        std::int64_t predicted_instruction_length = 0;
+
+        auto const is_uncond_jmp = decoded_instruction.meta.category == ZYDIS_CATEGORY_UNCOND_BR;
+        auto const is_cond_jmp   = decoded_instruction.meta.category == ZYDIS_CATEGORY_COND_BR;
+        auto const is_jmp        = is_uncond_jmp || is_cond_jmp;
+
+        // short relative
+        if (is_jmp && std::abs(delta - (prefix_count + 2)) <= 0x7FLL) {
+          encoder_request.branch_type = ZYDIS_BRANCH_TYPE_SHORT;
+          predicted_instruction_length = prefix_count + 2;
+        }
+        // near relative (unconditional JMPs/CALLs)
+        else if (!is_cond_jmp && std::abs(delta - (prefix_count + 5)) <= 0x7FFF'FFFFLL) {
+          encoder_request.branch_type = ZYDIS_BRANCH_TYPE_NEAR;
+          predicted_instruction_length = prefix_count + 5;
+        }
+        // near relative (conditional JMPs)
+        else if (is_cond_jmp && std::abs(delta - (prefix_count + 6)) <= 0x7FFF'FFFFLL) {
+          encoder_request.branch_type = ZYDIS_BRANCH_TYPE_NEAR;
+          predicted_instruction_length = prefix_count + 6;
+        }
+        // absolute
+        else {
           CHUM_LOG_ERROR("[!] Absolute branches not handled yet.\n");
           return false;
         }
-        // encode near branch
-        else if (delta > (0x7Fll + 2)) {
-          //encoder_request.branch_type  = ZYDIS_BRANCH_TYPE_NEAR;
-        }
-        // encode short branch
-        else {
-          //encoder_request.branch_type  = ZYDIS_BRANCH_TYPE_SHORT;
-        }
 
-        // im still not sure what this field is used for so im just ignoring it...
+        // i dont really know what this field is used for, so let the encoder choose
         encoder_request.branch_width = ZYDIS_BRANCH_WIDTH_NONE;
+
+        // write the new delta now that we know the length of the instruction
+        *delta_ptr = delta - predicted_instruction_length;
 
         status = ZydisEncoderEncodeInstruction(&encoder_request,
           new_instruction, &new_instruction_length);
 
-        //if (new_instruction_length != decoded_instruction.length) {
-          //CHUM_LOG_ERROR("[!] Failed to correctly predict branch instruction length.\n");
-          //return false;
-        //}
+        if (new_instruction_length != predicted_instruction_length) {
+          print_code_block(cb);
+
+          CHUM_LOG_ERROR("[!] Failed to correctly predict branch instruction length.\n");
+          CHUM_LOG_ERROR("[!]   Predicted length         = %zd.\n", predicted_instruction_length);
+          CHUM_LOG_ERROR("[!]   Real length              = %zu.\n", new_instruction_length);
+          CHUM_LOG_ERROR("[!]   Original prefix count    = %u.\n", decoded_instruction.raw.prefix_count);
+          CHUM_LOG_ERROR("[!]   Encoder request prefixes = %zX.\n", encoder_request.prefixes);
+
+          CHUM_LOG_ERROR("[!]   New instruction:\n[!]    ");
+          for (std::size_t i = 0; i < new_instruction_length; ++i)
+            CHUM_LOG_ERROR(" %.2X", new_instruction[i]);
+          CHUM_LOG_ERROR("\n");
+
+          return false;
+        }
       }
       // memory accesses (probably)
       else {
@@ -558,8 +583,8 @@ private:
   // find the operand that causes an instruction to be "relative" and
   // return a pointer to the operand's target delta.
   static std::int64_t* get_instruction_target_delta(
-      ZydisEncoderRequest* const encoder_request,
-      ZydisDecodedOperand* const decoded_operands) {
+      ZydisEncoderRequest*       const encoder_request,
+      ZydisDecodedOperand const* const decoded_operands) {
     // find the target delta, aka. the value that is added to RIP,
     // which can be either an immediate value or a memory displacement.
     for (std::size_t i = 0; i < encoder_request->operand_count; ++i) {
@@ -705,7 +730,7 @@ private:
       auto const length = disassemble_and_format(
         &file_buffer_[cb.file_offset + offset], cb.file_size - offset, str, 256);
       
-      printf("[+]    +%.3zX: ", offset);
+      printf("[+]     +%.3zX: ", offset);
       for (std::size_t i = 0; i < length; ++i)
         printf(" %.2X", file_buffer_[cb.file_offset + offset + i]);
       for (std::size_t i = 0; i < (15 - length); ++i)

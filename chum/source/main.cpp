@@ -170,6 +170,11 @@ public:
       &file_buffer_[rva_to_file_offset(exception_dir.VirtualAddress)]);
     runtime_funcs_count_ = exception_dir.Size / sizeof(RUNTIME_FUNCTION);
 
+    // import descriptors
+    auto const& import_dir = nt_header_->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
+    imports_ = reinterpret_cast<PIMAGE_IMPORT_DESCRIPTOR>(
+      &file_buffer_[rva_to_file_offset(import_dir.VirtualAddress)]);
+
     if (!parse())
       CHUM_LOG_ERROR("[!] Failed to parse binary.\n");
   }
@@ -189,6 +194,24 @@ public:
     return true;
   }
 
+  // memory where code will reside (X)
+  void add_code_region(void* const virtual_address, std::uint32_t const size) {
+    code_regions_.push_back({ static_cast<std::uint8_t*>(virtual_address), size });
+
+    // TODO: make sure the code regions are sorted
+  }
+
+  // memory where data will reside (RW)
+  void add_data_region(void* const virtual_address, std::uint32_t const size) {
+    data_regions_.push_back({ static_cast<std::uint8_t*>(virtual_address), size });
+  }
+
+  // get the new address of the entrypoint
+  void* entry_point() {
+    return rva_to_virtual_address(nt_header_->OptionalHeader.AddressOfEntryPoint);
+  }
+
+private:
   // write each data block to the provided data regions
   bool write_data_blocks() {
     if (data_blocks_.empty())
@@ -254,6 +277,23 @@ public:
 
     code_region_writer writer(code_regions_);
 
+    struct forward_target {
+      std::uint8_t* instruction_address;
+      std::uint32_t virtual_offset;
+      std::uint8_t patch_offset;
+      std::uint8_t patch_length;
+      std::uint8_t instruction_length;
+    };
+
+    struct compare {
+      bool operator()(forward_target const& left, forward_target const& right) const {
+        return left.virtual_offset < right.virtual_offset;
+      }
+    };
+
+    std::priority_queue<forward_target,
+      std::vector<forward_target>, compare> forward_targets;
+
     for (std::size_t curr_cb_idx = 0; curr_cb_idx < code_blocks_.size(); ++curr_cb_idx) {
       auto& cb = code_blocks_[curr_cb_idx];
 
@@ -299,19 +339,31 @@ public:
       std::uint8_t new_instruction[ZYDIS_MAX_INSTRUCTION_LENGTH];
       std::size_t new_instruction_length = ZYDIS_MAX_INSTRUCTION_LENGTH;
 
-      // branch instructions
-      if (decoded_instruction.meta.branch_type != ZYDIS_BRANCH_TYPE_NONE && !(decoded_instruction.attributes & ZYDIS_ATTRIB_HAS_MODRM)) {
-        //print_code_block(cb);
+      if (decoded_instruction.attributes & ZYDIS_ATTRIB_HAS_MODRM) {
 
+      }
+
+      // branch instructions
+      if (decoded_instruction.meta.branch_type != ZYDIS_BRANCH_TYPE_NONE &&
+          !(decoded_instruction.attributes & ZYDIS_ATTRIB_HAS_MODRM)) {
         //CHUM_LOG_INFO("[+] Fixing branch instruction.\n");
         //CHUM_LOG_INFO("[+]   Branch type      = %d.\n", encoder_request.branch_type);
         //CHUM_LOG_INFO("[+]   Branch width     = %d.\n", encoder_request.branch_width);
         //CHUM_LOG_INFO("[+]   Catagory type    = %d.\n", decoded_instruction.meta.category);
 
         auto const delta_ptr = get_instruction_target_delta(&encoder_request, decoded_operands);
+        auto const target_virtual_offset = cb.virtual_offset +
+          decoded_instruction.length + static_cast<std::int32_t>(*delta_ptr);
 
-        // delta from start of instruction
-        std::int64_t delta = *delta_ptr + decoded_instruction.length;
+        std::int64_t delta  = 0;
+        bool fully_resolved = false;
+
+        if (!calculate_adjusted_target_delta(writer.current_write_address(),
+            curr_cb_idx, target_virtual_offset, delta, fully_resolved)) {
+          CHUM_LOG_ERROR("[!] Failed to calculate adjusted target delta.\n");
+          print_code_block(cb);
+          return false;
+        }
 
         assert(decoded_instruction.meta.branch_type != ZYDIS_BRANCH_TYPE_FAR);
 
@@ -342,7 +394,10 @@ public:
         }
         // absolute
         else {
+          print_code_block(cb);
           CHUM_LOG_ERROR("[!] Absolute branches not handled yet.\n");
+          CHUM_LOG_ERROR("[!]   Adjusted target delta = %zd.\n", delta);
+          CHUM_LOG_ERROR("[!]   Original target delta = %zd.\n", *delta_ptr);
           return false;
         }
 
@@ -371,6 +426,17 @@ public:
 
           return false;
         }
+
+        // forward targets
+        if (!fully_resolved) {
+          forward_targets.push({
+            writer.current_write_address(),
+            target_virtual_offset,
+            static_cast<std::uint8_t>(new_instruction_length - (encoder_request.branch_type == ZYDIS_BRANCH_TYPE_SHORT ? 1 : 4)),
+            encoder_request.branch_type == ZYDIS_BRANCH_TYPE_SHORT ? 1ui8 : 4ui8,
+            static_cast<std::uint8_t>(new_instruction_length)
+          });
+        }
       }
       // memory accesses (probably)
       else {
@@ -391,24 +457,38 @@ public:
 
       CHUM_LOG_SPAM("[+] Encoded a new relative instruction at 0x%p:\n",
         cb.final_virtual_address);
+
+      while (!forward_targets.empty() && forward_targets.top().virtual_offset <= cb.virtual_offset + cb.file_size) {
+        auto const target = forward_targets.top();
+        forward_targets.pop();
+
+        assert(target.virtual_offset >= cb.virtual_offset);
+
+        auto const target_final_address = cb.final_virtual_address +
+          (target.virtual_offset - cb.virtual_offset);
+        auto const delta = target_final_address -
+          (target.instruction_address + target.instruction_length);
+
+        assert(target.patch_length == 1 || target.patch_length == 4);
+
+        if (target.patch_length == 1) {
+          auto const value = static_cast<std::int8_t>(delta);
+          memcpy(target.instruction_address + target.patch_offset, &value, 1);
+        }
+        else {
+          auto const value = static_cast<std::int32_t>(delta);
+          memcpy(target.instruction_address + target.patch_offset, &value, 4);
+        }
+
+        CHUM_LOG_INFO("[+] Fixed forward target.\n");
+      }
     }
+
+    fix_imports();
 
     return true;
   }
 
-  // memory where code will reside (X)
-  void add_code_region(void* const virtual_address, std::uint32_t const size) {
-    code_regions_.push_back({ static_cast<std::uint8_t*>(virtual_address), size });
-
-    // TODO: make sure the code regions are sorted
-  }
-
-  // memory where data will reside (RW)
-  void add_data_region(void* const virtual_address, std::uint32_t const size) {
-    data_regions_.push_back({ static_cast<std::uint8_t*>(virtual_address), size });
-  }
-
-private:
   // populate the code/data blocks that make up the binary
   bool parse() {
     // TODO: add external references to code blocks that are not covered by
@@ -550,6 +630,32 @@ private:
     return true;
   }
 
+  void fix_imports() {
+    for (auto descriptor = imports_; descriptor->OriginalFirstThunk; ++descriptor) {
+      auto const module_name = reinterpret_cast<char const*>(
+        &file_buffer_[rva_to_file_offset(descriptor->Name)]);
+
+      CHUM_LOG_INFO("[+] Loading import module: %s.\n", module_name);
+
+      auto const hmodule = LoadLibraryA(module_name);
+
+      auto orig_first_thunk = reinterpret_cast<PIMAGE_THUNK_DATA>(
+        &file_buffer_[rva_to_file_offset(descriptor->OriginalFirstThunk)]);
+      auto first_thunk = reinterpret_cast<PIMAGE_THUNK_DATA>(
+        rva_to_virtual_address(descriptor->FirstThunk));
+
+      for (; orig_first_thunk->u1.AddressOfData; ++first_thunk, ++orig_first_thunk) {
+        auto const import_name = reinterpret_cast<PIMAGE_IMPORT_BY_NAME>(
+          &file_buffer_[rva_to_file_offset(static_cast<std::uint32_t>(orig_first_thunk->u1.AddressOfData))]);
+
+        CHUM_LOG_INFO("[+]   Import name: %s.\n", import_name->Name);
+
+        first_thunk->u1.Function = reinterpret_cast<std::uint64_t>(
+          GetProcAddress(hmodule, import_name->Name));
+      }
+    }
+  }
+
   // read all the contents of a file and return the bytes in a vector
   static std::vector<std::uint8_t> read_file_to_buffer(char const* const path) {
     // open the file
@@ -578,6 +684,39 @@ private:
     }
 
     return 0;
+  }
+
+  // get the code block that an RVA lands in
+  code_block* rva_to_code_block(std::uint32_t const rva) {
+    for (auto& cb : code_blocks_) {
+      if (rva < cb.virtual_offset || rva >= (cb.virtual_offset + cb.file_size))
+        continue;
+
+      return &cb;
+    }
+
+    return nullptr;
+  }
+
+  // get the final virtual address of an RVA
+  void* rva_to_virtual_address(std::uint32_t const rva) const {
+    // data blocks
+    for (auto& db : data_blocks_) {
+      if (rva < db.virtual_offset || rva >= (db.virtual_offset + db.file_size))
+        continue;
+
+      return db.final_virtual_address + (rva - db.virtual_offset);
+    }
+
+    // code blocks
+    for (auto& cb : code_blocks_) {
+      if (rva < cb.virtual_offset || rva >= (cb.virtual_offset + cb.file_size))
+        continue;
+
+      return cb.final_virtual_address + (rva - cb.virtual_offset);
+    }
+
+    return nullptr;
   }
 
   // find the operand that causes an instruction to be "relative" and
@@ -642,17 +781,20 @@ private:
 
     // backward targets can also be immediately resolved since their
     // final address has already been determined.
-    if (target_virtual_offset <= cb.virtual_offset) {
+    if (target_virtual_offset < cb.virtual_offset) {
       // search backwards for the code block that contains the target
       for (std::size_t i = current_cb_idx + 1; i > 0; --i) {
         auto const& cb = code_blocks_[i - 1];
 
         if (target_virtual_offset < cb.virtual_offset ||
-            target_virtual_offset >= (cb.virtual_offset + cb.file_size))
+            target_virtual_offset > (cb.virtual_offset + cb.file_size))
           continue;
 
         // this is a bit of an edgecase so i'll just handle it when it comes up
-        assert(!cb.is_relative);
+        if (cb.is_relative && cb.virtual_offset != target_virtual_offset) {
+          CHUM_LOG_ERROR("[!] Backward target is in the middle of a relative instruction.\n");
+          return false;
+        }
 
         auto const target_final_address = cb.final_virtual_address +
           (target_virtual_offset - cb.virtual_offset);
@@ -671,9 +813,6 @@ private:
       return false;
     }
 
-    target_delta   = 0;
-    fully_resolved = false;
-
     // forward targets can't be immediately resolved, so we're just gonna
     // return the worst-case target delta. this will act as a placeholder
     // until we're able to resolve the real delta.
@@ -683,7 +822,7 @@ private:
       target_delta += cb.expected_size;
 
       if (target_virtual_offset < cb.virtual_offset ||
-          target_virtual_offset >= (cb.virtual_offset + cb.file_size))
+          target_virtual_offset > (cb.virtual_offset + cb.file_size))
         continue;
 
       CHUM_LOG_SPAM("[+] Calculated forward target delta: %c0x%zX.\n",
@@ -758,6 +897,9 @@ private:
   PRUNTIME_FUNCTION runtime_funcs_ = nullptr;
   std::size_t runtime_funcs_count_ = 0;
 
+  // imports
+  PIMAGE_IMPORT_DESCRIPTOR imports_ = nullptr;
+
   // this is where the binary will be written to
   std::vector<memory_region> code_regions_ = {};
   std::vector<memory_region> data_regions_ = {};
@@ -770,13 +912,13 @@ private:
 int main() {
   auto const start_time = std::chrono::high_resolution_clock::now();
 
-  chum_parser chum("C:/Windows/system32/ntoskrnl.exe");
-  chum.add_code_region(VirtualAlloc(nullptr, 0x1'000'000, MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE), 0x1'000'000);
-  chum.add_data_region(VirtualAlloc(nullptr, 0x1'000'000, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE),         0x1'000'000);
+  //chum_parser chum("C:/Users/realj/Desktop/ntoskrnl (19041.1110).exe");
+  //chum.add_code_region(VirtualAlloc(nullptr, 0x1'000'000, MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE), 0x1'000'000);
+  //chum.add_data_region(VirtualAlloc(nullptr, 0x1'000'000, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE),         0x1'000'000);
 
-  //chum_parser chum("./hello-world-x64.dll");
-  //chum.add_code_region(VirtualAlloc(nullptr, 0x4000, MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE), 0x4000);
-  //chum.add_data_region(VirtualAlloc(nullptr, 0x4000, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE),         0x4000);
+  chum_parser chum("./hello-world-x64-min.dll");
+  chum.add_code_region(VirtualAlloc(nullptr, 0x4000, MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE), 0x4000);
+  chum.add_data_region(VirtualAlloc(nullptr, 0x4000, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE),         0x4000);
 
   if (!chum.write())
     CHUM_LOG_ERROR("[!] Failed to write binary to memory.\n");
@@ -784,4 +926,12 @@ int main() {
   auto const end_time = std::chrono::high_resolution_clock::now();
 
   CHUM_LOG_INFO("[+] Time elapsed: %zums\n", std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time).count());
+  CHUM_LOG_INFO("[+] Entrypoint:   0x%p.\n", chum.entry_point());
+
+  auto const entry_point = static_cast<
+    BOOL(WINAPI*)(HINSTANCE, DWORD, LPVOID)>(chum.entry_point());
+
+  // call the DLL entrypoint
+  entry_point(nullptr, DLL_PROCESS_ATTACH, nullptr);
 }
+

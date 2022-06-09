@@ -339,36 +339,57 @@ private:
       std::uint8_t new_instruction[ZYDIS_MAX_INSTRUCTION_LENGTH];
       std::size_t new_instruction_length = ZYDIS_MAX_INSTRUCTION_LENGTH;
 
-      if (decoded_instruction.attributes & ZYDIS_ATTRIB_HAS_MODRM) {
+      auto const delta_ptr = get_instruction_target_delta(&encoder_request, decoded_operands);
+      auto const target_virtual_offset = cb.virtual_offset +
+        decoded_instruction.length + static_cast<std::int32_t>(*delta_ptr);
 
+      std::int64_t delta  = 0;
+      bool fully_resolved = false;
+
+      if (!calculate_adjusted_target_delta(writer.current_write_address(),
+          curr_cb_idx, target_virtual_offset, delta, fully_resolved)) {
+        CHUM_LOG_ERROR("[!] Failed to calculate adjusted target delta.\n");
+        print_code_block(cb);
+        return false;
       }
 
-      // branch instructions
-      if (decoded_instruction.meta.branch_type != ZYDIS_BRANCH_TYPE_NONE &&
-          !(decoded_instruction.attributes & ZYDIS_ATTRIB_HAS_MODRM)) {
+      // this is the number of prefixes that the new instruction will have
+      std::int64_t const prefix_count = __popcnt64(encoder_request.prefixes);
+
+      // memory accesses
+      if (decoded_instruction.attributes & ZYDIS_ATTRIB_HAS_MODRM) {
+        delta -= decoded_instruction.length;
+
+        if (std::abs(delta) > 0x7FFF'FFFFLL) {
+          CHUM_LOG_ERROR("[!] Memory access delta is too big.\n");
+          return false;
+        }
+
+        if (fully_resolved) {
+          new_instruction_length = decoded_instruction.length;
+          memcpy(new_instruction, &file_buffer_[cb.file_offset], new_instruction_length);
+
+          auto const value = static_cast<std::int32_t>(delta);
+          memcpy(new_instruction + decoded_instruction.raw.disp.offset, &value, 4);
+        }
+        else {
+          forward_targets.push({
+            writer.current_write_address(),
+            target_virtual_offset,
+            decoded_instruction.raw.disp.offset,
+            4,
+            decoded_instruction.length
+          });
+        }
+      }
+      // branch instructions (that don't use memory accesses)
+      else if (decoded_instruction.meta.branch_type != ZYDIS_BRANCH_TYPE_NONE) {
         //CHUM_LOG_INFO("[+] Fixing branch instruction.\n");
         //CHUM_LOG_INFO("[+]   Branch type      = %d.\n", encoder_request.branch_type);
         //CHUM_LOG_INFO("[+]   Branch width     = %d.\n", encoder_request.branch_width);
         //CHUM_LOG_INFO("[+]   Catagory type    = %d.\n", decoded_instruction.meta.category);
 
-        auto const delta_ptr = get_instruction_target_delta(&encoder_request, decoded_operands);
-        auto const target_virtual_offset = cb.virtual_offset +
-          decoded_instruction.length + static_cast<std::int32_t>(*delta_ptr);
-
-        std::int64_t delta  = 0;
-        bool fully_resolved = false;
-
-        if (!calculate_adjusted_target_delta(writer.current_write_address(),
-            curr_cb_idx, target_virtual_offset, delta, fully_resolved)) {
-          CHUM_LOG_ERROR("[!] Failed to calculate adjusted target delta.\n");
-          print_code_block(cb);
-          return false;
-        }
-
         assert(decoded_instruction.meta.branch_type != ZYDIS_BRANCH_TYPE_FAR);
-
-        // this is the number of prefixes that the new instruction will have
-        std::int64_t const prefix_count = __popcnt64(encoder_request.prefixes);
 
         // this is just used to check if we correctly predicted the instruction length
         std::int64_t predicted_instruction_length = 0;
@@ -410,6 +431,11 @@ private:
         status = ZydisEncoderEncodeInstruction(&encoder_request,
           new_instruction, &new_instruction_length);
 
+        if (ZYAN_FAILED(status)) {
+          CHUM_LOG_ERROR("[!] Failed to encode relative instruction. Status: 0x%X.\n", status);
+          return false;
+        }
+
         if (new_instruction_length != predicted_instruction_length) {
           print_code_block(cb);
 
@@ -440,13 +466,6 @@ private:
       }
       // memory accesses (probably)
       else {
-        status = ZydisEncoderEncodeInstruction(&encoder_request,
-          new_instruction, &new_instruction_length);
-      }
-
-      if (ZYAN_FAILED(status)) {
-        CHUM_LOG_ERROR("[!] Failed to encode relative instruction. Status: 0x%X.\n", status);
-        return false;
       }
 
       if (!writer.force_write(new_instruction,
@@ -933,5 +952,7 @@ int main() {
 
   // call the DLL entrypoint
   entry_point(nullptr, DLL_PROCESS_ATTACH, nullptr);
+
+  printf("chum.\n");
 }
 

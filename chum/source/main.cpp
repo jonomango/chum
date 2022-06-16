@@ -6,7 +6,7 @@
 #include <chrono>
 #include <Windows.h>
 
-#define CHUM_LOG_SPAM(...) (void)0 //printf(__VA_ARGS__)
+#define CHUM_LOG_SPAM(...) printf(__VA_ARGS__)
 #define CHUM_LOG_INFO(...) printf(__VA_ARGS__)
 #define CHUM_LOG_WARNING(...) (void)0 //printf(__VA_ARGS__)
 #define CHUM_LOG_ERROR(...) printf(__VA_ARGS__)
@@ -175,7 +175,7 @@ public:
     imports_ = reinterpret_cast<PIMAGE_IMPORT_DESCRIPTOR>(
       &file_buffer_[rva_to_file_offset(import_dir.VirtualAddress)]);
 
-    if (!parse())
+    if (!parse2())
       CHUM_LOG_ERROR("[!] Failed to parse binary.\n");
   }
 
@@ -360,6 +360,8 @@ private:
       if (decoded_instruction.attributes & ZYDIS_ATTRIB_HAS_MODRM) {
         delta -= decoded_instruction.length;
 
+        // TODO: reencode_memory_access()
+
         if (std::abs(delta) > 0x7FFF'FFFFLL) {
           CHUM_LOG_ERROR("[!] Memory access delta is too big.\n");
           return false;
@@ -400,7 +402,9 @@ private:
           return false;
         }
 
-        // forward targets
+        // TODO: reencode_branch() which handles absolute branches as well
+
+        // forward targets need to be resolved later
         if (!fully_resolved) {
           forward_targets.push({
             writer.current_write_address(),
@@ -593,6 +597,117 @@ private:
 
     CHUM_LOG_INFO("[+] Number of code blocks:          %zu (0x%zX bytes).\n",
       code_blocks_.size(), code_blocks_.size() * sizeof(code_block));
+
+    return true;
+  }
+
+  bool parse2() {
+    // returns true if the provided RVA has already been disassembled
+    auto const already_disassembled = [](std::uint32_t const rva) {
+      return false;
+    };
+
+    // essentially a queue of RVAs that need to be processed
+    std::vector<std::uint32_t> process_queue = {};
+
+    for (std::size_t i = 0; i < runtime_funcs_count_; ++i) {
+      process_queue.emplace_back(runtime_funcs_[i].BeginAddress);
+      // TODO: might be useful to add the exception filter as well
+    }
+
+    while (!process_queue.empty()) {
+      auto const block_offset = process_queue.back();
+      process_queue.pop_back();
+
+      if (already_disassembled(block_offset))
+        continue;
+
+      auto const file_offset = rva_to_file_offset(block_offset);
+
+      CHUM_LOG_SPAM("[+] Processing RVA.\n");
+      CHUM_LOG_SPAM("[+]   Block offset: +0x%X.\n", block_offset);
+      CHUM_LOG_SPAM("[+]   File offset:  +0x%X.\n", file_offset);
+
+      // offset (in bytes) of the current instruction from the start of the block
+      std::uint32_t instruction_offset = 0;
+
+      CHUM_LOG_SPAM("[+]   Decoding block:\n");
+
+      while (true) {
+        ZydisDecodedInstruction decoded_instruction;
+
+        // TODO: should probably use section boundaries instead of checking
+        //       against the size of the file buffer.
+        auto const status = ZydisDecoderDecodeInstruction(&decoder_, nullptr,
+          &file_buffer_[file_offset + instruction_offset],
+          file_buffer_.size() - file_offset - instruction_offset, &decoded_instruction);
+
+        char str[256];
+        auto const length = disassemble_and_format(
+          &file_buffer_[file_offset + instruction_offset], 15, str, 256);
+        
+        printf("[+]     +%.3X: ", instruction_offset);
+        for (std::size_t i = 0; i < length; ++i)
+          printf(" %.2X", file_buffer_[file_offset + instruction_offset + i]);
+        for (std::size_t i = 0; i < (15 - length); ++i)
+          printf("   ");
+        printf(" %s.\n", str);
+
+        if (ZYAN_FAILED(status)) {
+          CHUM_LOG_SPAM("[+]     Ending block: Failed to decode instruction.\n");
+          break;
+        }
+
+        //if (decoded_instruction.attributes & ZYDIS_ATTRIB_IS_RELATIVE)
+        //  continue;
+
+        // All code that has been processed is 100% code and not data. The
+        // only exception is if an exit point was missed (i.e. CALL sometimes).
+        // After code has been processed, linear disassembly can be used to
+        // optimistically find leaf functions. Jump tables can also be scanned
+        // for.
+        // 
+        // Need a function for appending the current instruction to the current
+        // block. If the instruction is relative, it should handle creating
+        // a new block as well as ending the current one if needed.
+        // 
+        // Pseudo-code:
+        // 1. Check if the starting RVA is unique.
+        // 2. Keep decoding every instruction:
+        //   - If decode failure:
+        //     + Assert.
+        //   - If UNCOND_BR or COND_BR or CALL:
+        //     + Mark the target destination to be later processed.
+        //   - Append_Curr_Instr().
+        //   - If RET or INT or UNCOND_BR: // No instructions after this point.
+        //     + Return.
+        void begin_processing(std::uint32_t rva);
+
+        switch (decoded_instruction.meta.category) {
+        case ZYDIS_CATEGORY_RET:
+          // end the current code block.
+          break;
+        case ZYDIS_CATEGORY_UNCOND_BR:
+          // add the JMP destination to process.
+          // end the current code block.
+          break;
+        case ZYDIS_CATEGORY_COND_BR:
+          // add the JMP destination to process.
+          // add the next instruction to process.
+          // end the current code block.
+          break;
+        case ZYDIS_CATEGORY_CALL:
+          // add the CALL destination to process.
+          // add the next instruction to process.
+          // end the current code block.
+          break;
+        case ZYDIS_CATEGORY_INTERRUPT:
+          break;
+        }
+
+        instruction_offset += decoded_instruction.length;
+      }
+    }
 
     return true;
   }
@@ -959,9 +1074,11 @@ int main() {
   //chum.add_code_region(VirtualAlloc(nullptr, 0x1'000'000, MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE), 0x1'000'000);
   //chum.add_data_region(VirtualAlloc(nullptr, 0x1'000'000, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE),         0x1'000'000);
 
-  chum_parser chum("./hello-world-x64-min.dll");
+  chum_parser chum("./hello-world-x64.dll");
   chum.add_code_region(VirtualAlloc(nullptr, 0x4000, MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE), 0x4000);
   chum.add_data_region(VirtualAlloc(nullptr, 0x4000, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE),         0x4000);
+
+  return 0;
 
   if (!chum.write())
     CHUM_LOG_ERROR("[!] Failed to write binary to memory.\n");

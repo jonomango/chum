@@ -607,6 +607,24 @@ private:
       return false;
     };
 
+    // creates an empty, non-relative code block at the specified RVA/file offset
+    auto const create_empty_code_block = [this](
+        std::uint32_t const rva, std::uint32_t const file_offset) {
+      // create an empty code block
+      auto cb = &code_blocks_.emplace_back();
+      cb->is_relative = false;
+
+      // these are determined when being written to memory
+      cb->final_virtual_address = 0;
+      cb->final_size            = 0;
+
+      cb->virtual_offset = rva;
+      cb->file_offset    = file_offset;
+      cb->file_size      = 0;
+
+      return cb;
+    };
+
     // essentially a queue of RVAs that need to be processed
     std::vector<std::uint32_t> process_queue = {};
 
@@ -627,13 +645,12 @@ private:
       CHUM_LOG_SPAM("[+] Processing RVA.\n");
       CHUM_LOG_SPAM("[+]   Block offset: +0x%X.\n", block_offset);
       CHUM_LOG_SPAM("[+]   File offset:  +0x%X.\n", file_offset);
-
-      // offset (in bytes) of the current instruction from the start of the block
-      std::uint32_t instruction_offset = 0;
-
       CHUM_LOG_SPAM("[+]   Decoding block:\n");
 
-      while (true) {
+      auto cb = create_empty_code_block(block_offset, file_offset);
+
+      // keep decoding until we reach an exit-point
+      for (std::uint32_t instruction_offset = 0; true;) {
         ZydisDecodedInstruction decoded_instruction;
 
         // TODO: should probably use section boundaries instead of checking
@@ -642,24 +659,86 @@ private:
           &file_buffer_[file_offset + instruction_offset],
           file_buffer_.size() - file_offset - instruction_offset, &decoded_instruction);
 
-        char str[256];
-        auto const length = disassemble_and_format(
-          &file_buffer_[file_offset + instruction_offset], 15, str, 256);
-        
-        printf("[+]     +%.3X: ", instruction_offset);
-        for (std::size_t i = 0; i < length; ++i)
-          printf(" %.2X", file_buffer_[file_offset + instruction_offset + i]);
-        for (std::size_t i = 0; i < (15 - length); ++i)
-          printf("   ");
-        printf(" %s.\n", str);
-
         if (ZYAN_FAILED(status)) {
-          CHUM_LOG_SPAM("[+]     Ending block: Failed to decode instruction.\n");
+          CHUM_LOG_ERROR("[+] Failed to decode instruction.\n");
+          return false;
+        }
+
+        {
+          char str[256];
+          auto const length = disassemble_and_format(
+            &file_buffer_[file_offset + instruction_offset], 15, str, 256);
+
+          printf("[+]     +%.3X: ", instruction_offset);
+          for (std::size_t i = 0; i < length; ++i)
+            printf(" %.2X", file_buffer_[file_offset + instruction_offset + i]);
+          for (std::size_t i = 0; i < (15 - length); ++i)
+            printf("   ");
+          printf(" %s.\n", str);
+        }
+
+        // TODO: we might also want to find memory references in order to
+        // better separate code from data. i.e. CALL [RIP+0x69] means that
+        // there is data, not code, at RIP+0x69.
+
+        // these instructions reference more code that we want to recursively
+        // disassemble.
+        if (decoded_instruction.meta.category == ZYDIS_CATEGORY_CALL ||
+            decoded_instruction.meta.category == ZYDIS_CATEGORY_UNCOND_BR ||
+            decoded_instruction.meta.category == ZYDIS_CATEGORY_COND_BR) {
+          CHUM_LOG_SPAM("[+]       Marking target to be later processed.\n");
+          CHUM_LOG_SPAM("[+]       imm: 0x%zX.\n", decoded_instruction.raw.imm[0].value.u);
+        }
+
+        // a relative code block can only contain a single instruction, so
+        // we need to start a new code block where the old one ended.
+        if (cb->is_relative) {
+          assert(cb->file_size > 0);
+
+          cb = create_empty_code_block(block_offset +
+            instruction_offset, file_offset + instruction_offset);
+        }
+
+        if (decoded_instruction.attributes & ZYDIS_ATTRIB_IS_RELATIVE) {
+          // if there are instructions in the current code block, we need
+          // to make a new one since relative code blocks can only contain
+          // a single instruction.
+          if (cb->file_size > 0) {
+            cb = create_empty_code_block(block_offset +
+              instruction_offset, file_offset + instruction_offset);
+          }
+
+          assert(cb->file_size == 0);
+
+          cb->is_relative   = true;
+          cb->file_size     = decoded_instruction.length;
+
+          // TODO: this is not accurate at all...
+          cb->expected_size = decoded_instruction.length + 32;
+        } else {
+          assert(!cb->is_relative);
+
+          cb->file_size     += decoded_instruction.length;
+          cb->expected_size += decoded_instruction.length;
+        }
+
+        instruction_offset += decoded_instruction.length;
+
+        // these instructions are "exit-points." no instructions that reside
+        // after will be executed, so we should stop decoding.
+        if (decoded_instruction.meta.category == ZYDIS_CATEGORY_RET ||
+            decoded_instruction.meta.category == ZYDIS_CATEGORY_INTERRUPT ||
+            decoded_instruction.meta.category == ZYDIS_CATEGORY_UNCOND_BR) {
+          // this probably means that we missed an exit-point (maybe a jump
+          // table or something) that needs to be investigated. it could also
+          // just be a real debug instruction that really is part of the code.
+          assert(decoded_instruction.opcode != 0xCC);
+
+          // TODO: INT1/INT3/INT2E might not be exit-points.
+          CHUM_LOG_SPAM("[+]       Exit point detected.\n");
           break;
         }
 
-        //if (decoded_instruction.attributes & ZYDIS_ATTRIB_IS_RELATIVE)
-        //  continue;
 
         // All code that has been processed is 100% code and not data. The
         // only exception is if an exit point was missed (i.e. CALL sometimes).
@@ -672,41 +751,28 @@ private:
         // a new block as well as ending the current one if needed.
         // 
         // Pseudo-code:
-        // 1. Check if the starting RVA is unique.
+        // 1. Check if the starting RVA is unexplored.
+        //   - If RVA is not present in hash-table. This RVA is unexplored.
+        //   - Check existing code blocks to see if the RVA has been explored.
         // 2. Keep decoding every instruction:
+        //   - Mark the current RVA as present in the hash-table.
         //   - If decode failure:
         //     + Assert.
         //   - If UNCOND_BR or COND_BR or CALL:
         //     + Mark the target destination to be later processed.
         //   - Append_Curr_Instr().
-        //   - If RET or INT or UNCOND_BR: // No instructions after this point.
+        //   - If RET or INT or UNCOND_BR: // No instructions after this point. INT3/INT1 *might* be an exception.
+        //     + If INT3/INT1/INT2E:
+        //       - Continue.
+        //     + TODO: maybe we can add the next instruction to a list to be
+        //             later processed by following 0xCC's until a valid instruction
+        //             is hit?
         //     + Return.
-        void begin_processing(std::uint32_t rva);
-
-        switch (decoded_instruction.meta.category) {
-        case ZYDIS_CATEGORY_RET:
-          // end the current code block.
-          break;
-        case ZYDIS_CATEGORY_UNCOND_BR:
-          // add the JMP destination to process.
-          // end the current code block.
-          break;
-        case ZYDIS_CATEGORY_COND_BR:
-          // add the JMP destination to process.
-          // add the next instruction to process.
-          // end the current code block.
-          break;
-        case ZYDIS_CATEGORY_CALL:
-          // add the CALL destination to process.
-          // add the next instruction to process.
-          // end the current code block.
-          break;
-        case ZYDIS_CATEGORY_INTERRUPT:
-          break;
-        }
-
-        instruction_offset += decoded_instruction.length;
       }
+    }
+
+    for (auto const& cb : code_blocks_) {
+      print_code_block(cb);
     }
 
     return true;

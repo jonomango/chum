@@ -8,7 +8,7 @@
 
 #define CHUM_LOG_SPAM(...) printf(__VA_ARGS__)
 #define CHUM_LOG_INFO(...) printf(__VA_ARGS__)
-#define CHUM_LOG_WARNING(...) (void)0 //printf(__VA_ARGS__)
+#define CHUM_LOG_WARNING(...) printf(__VA_ARGS__)
 #define CHUM_LOG_ERROR(...) printf(__VA_ARGS__)
 
 // TODO: make the code_block structure smaller. size fields can be a single
@@ -602,11 +602,6 @@ private:
   }
 
   bool parse2() {
-    // returns true if the provided RVA has already been disassembled
-    auto const already_disassembled = [](std::uint32_t const rva) {
-      return false;
-    };
-
     // creates an empty, non-relative code block at the specified RVA/file offset
     auto const create_empty_code_block = [this](
         std::uint32_t const rva, std::uint32_t const file_offset) {
@@ -629,15 +624,21 @@ private:
     std::vector<std::uint32_t> process_queue = {};
 
     for (std::size_t i = 0; i < runtime_funcs_count_; ++i) {
-      process_queue.emplace_back(runtime_funcs_[i].BeginAddress);
       // TODO: might be useful to add the exception filter as well
+      process_queue.emplace_back(runtime_funcs_[i].BeginAddress);
     }
+
+    // lookup table for whether the START of an instruction has already
+    // been disassembled. this will probably give weird results for JMPs
+    // that land in the middle of an instruction, but it might just be
+    // correct in those cases (and spawn a new code block).
+    std::vector<bool> already_disassembled(nt_header_->OptionalHeader.SizeOfImage, false);
 
     while (!process_queue.empty()) {
       auto const block_offset = process_queue.back();
       process_queue.pop_back();
 
-      if (already_disassembled(block_offset))
+      if (already_disassembled[block_offset])
         continue;
 
       auto const file_offset = rva_to_file_offset(block_offset);
@@ -651,6 +652,8 @@ private:
 
       // keep decoding until we reach an exit-point
       for (std::uint32_t instruction_offset = 0; true;) {
+        already_disassembled[block_offset + instruction_offset] = true;
+
         ZydisDecodedInstruction decoded_instruction;
 
         // TODO: should probably use section boundaries instead of checking
@@ -660,34 +663,43 @@ private:
           file_buffer_.size() - file_offset - instruction_offset, &decoded_instruction);
 
         if (ZYAN_FAILED(status)) {
-          CHUM_LOG_ERROR("[+] Failed to decode instruction.\n");
-          return false;
+          CHUM_LOG_WARNING("[+] Failed to decode instruction.\n");
+          break;
         }
 
+        if (false)
         {
           char str[256];
           auto const length = disassemble_and_format(
             &file_buffer_[file_offset + instruction_offset], 15, str, 256);
 
-          printf("[+]     +%.3X: ", instruction_offset);
+          CHUM_LOG_SPAM("[+]     +%.6X: ", block_offset + instruction_offset);
           for (std::size_t i = 0; i < length; ++i)
-            printf(" %.2X", file_buffer_[file_offset + instruction_offset + i]);
+            CHUM_LOG_SPAM(" %.2X", file_buffer_[file_offset + instruction_offset + i]);
           for (std::size_t i = 0; i < (15 - length); ++i)
-            printf("   ");
-          printf(" %s.\n", str);
+            CHUM_LOG_SPAM("   ");
+          CHUM_LOG_SPAM(" %s.\n", str);
         }
 
         // TODO: we might also want to find memory references in order to
         // better separate code from data. i.e. CALL [RIP+0x69] means that
         // there is data, not code, at RIP+0x69.
 
+        // TODO: filter out useless instructions (i.e. NOP)
+
         // these instructions reference more code that we want to recursively
-        // disassemble.
-        if (decoded_instruction.meta.category == ZYDIS_CATEGORY_CALL ||
-            decoded_instruction.meta.category == ZYDIS_CATEGORY_UNCOND_BR ||
-            decoded_instruction.meta.category == ZYDIS_CATEGORY_COND_BR) {
-          CHUM_LOG_SPAM("[+]       Marking target to be later processed.\n");
-          CHUM_LOG_SPAM("[+]       imm: 0x%zX.\n", decoded_instruction.raw.imm[0].value.u);
+        // disassemble (i.e. CALL, JMP, JCC).
+        if (decoded_instruction.raw.imm[0].is_relative) {
+          assert(decoded_instruction.raw.imm[0].is_signed);
+          assert(decoded_instruction.meta.branch_type != ZYDIS_BRANCH_TYPE_NONE ||
+            decoded_instruction.mnemonic == ZYDIS_MNEMONIC_XBEGIN);
+
+          auto const target = static_cast<std::uint32_t>(block_offset + instruction_offset +
+            decoded_instruction.length + decoded_instruction.raw.imm[0].value.s);
+
+          process_queue.push_back(target);
+
+          CHUM_LOG_SPAM("[+]       Marking target to be later processed: +0x%X.\n", target);
         }
 
         // a relative code block can only contain a single instruction, so
@@ -732,47 +744,13 @@ private:
           // this probably means that we missed an exit-point (maybe a jump
           // table or something) that needs to be investigated. it could also
           // just be a real debug instruction that really is part of the code.
-          assert(decoded_instruction.opcode != 0xCC);
+          //assert(decoded_instruction.opcode != 0xCC);
 
           // TODO: INT1/INT3/INT2E might not be exit-points.
           CHUM_LOG_SPAM("[+]       Exit point detected.\n");
           break;
         }
-
-
-        // All code that has been processed is 100% code and not data. The
-        // only exception is if an exit point was missed (i.e. CALL sometimes).
-        // After code has been processed, linear disassembly can be used to
-        // optimistically find leaf functions. Jump tables can also be scanned
-        // for.
-        // 
-        // Need a function for appending the current instruction to the current
-        // block. If the instruction is relative, it should handle creating
-        // a new block as well as ending the current one if needed.
-        // 
-        // Pseudo-code:
-        // 1. Check if the starting RVA is unexplored.
-        //   - If RVA is not present in hash-table. This RVA is unexplored.
-        //   - Check existing code blocks to see if the RVA has been explored.
-        // 2. Keep decoding every instruction:
-        //   - Mark the current RVA as present in the hash-table.
-        //   - If decode failure:
-        //     + Assert.
-        //   - If UNCOND_BR or COND_BR or CALL:
-        //     + Mark the target destination to be later processed.
-        //   - Append_Curr_Instr().
-        //   - If RET or INT or UNCOND_BR: // No instructions after this point. INT3/INT1 *might* be an exception.
-        //     + If INT3/INT1/INT2E:
-        //       - Continue.
-        //     + TODO: maybe we can add the next instruction to a list to be
-        //             later processed by following 0xCC's until a valid instruction
-        //             is hit?
-        //     + Return.
       }
-    }
-
-    for (auto const& cb : code_blocks_) {
-      print_code_block(cb);
     }
 
     return true;
@@ -1144,12 +1122,13 @@ int main() {
   chum.add_code_region(VirtualAlloc(nullptr, 0x4000, MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE), 0x4000);
   chum.add_data_region(VirtualAlloc(nullptr, 0x4000, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE),         0x4000);
 
+  auto const end_time = std::chrono::high_resolution_clock::now();
+  CHUM_LOG_INFO("[+] Time elapsed: %zums\n", std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time).count());
+
   return 0;
 
   if (!chum.write())
     CHUM_LOG_ERROR("[!] Failed to write binary to memory.\n");
-
-  auto const end_time = std::chrono::high_resolution_clock::now();
 
   CHUM_LOG_INFO("[+] Time elapsed: %zums\n", std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time).count());
   CHUM_LOG_INFO("[+] Entrypoint:   0x%p.\n", chum.entry_point());

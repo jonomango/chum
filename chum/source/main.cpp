@@ -288,7 +288,7 @@ private:
 
     struct compare {
       bool operator()(forward_target const& left, forward_target const& right) const {
-        return left.virtual_offset < right.virtual_offset;
+        return left.virtual_offset > right.virtual_offset;
       }
     };
 
@@ -307,6 +307,31 @@ private:
 
         CHUM_LOG_SPAM("[+] Copied 0x%X code bytes from +0x%X to 0x%p.\n",
           cb.file_size, cb.virtual_offset, cb.final_virtual_address);
+
+        while (!forward_targets.empty() && forward_targets.top().virtual_offset < cb.virtual_offset + cb.file_size) {
+          auto const target = forward_targets.top();
+          forward_targets.pop();
+
+          assert(target.virtual_offset >= cb.virtual_offset);
+
+          auto const target_final_address = cb.final_virtual_address +
+            (target.virtual_offset - cb.virtual_offset);
+          auto const delta = target_final_address -
+            (target.instruction_address + target.instruction_length);
+
+          assert(target.patch_length == 1 || target.patch_length == 4);
+
+          if (target.patch_length == 1) {
+            auto const value = static_cast<std::int8_t>(delta);
+            memcpy(target.instruction_address + target.patch_offset, &value, 1);
+          }
+          else {
+            auto const value = static_cast<std::int32_t>(delta);
+            memcpy(target.instruction_address + target.patch_offset, &value, 4);
+          }
+
+          CHUM_LOG_INFO("[+] Fixed forward target.\n");
+        }
 
         continue;
       }
@@ -351,7 +376,9 @@ private:
           curr_cb_idx, target_virtual_offset, delta, fully_resolved)) {
         CHUM_LOG_ERROR("[!] Failed to calculate adjusted target delta.\n");
         print_code_block(cb);
-        return false;
+        //return false;
+        fully_resolved = true;
+        delta = 0x12345678;
       }
 
       // this is the number of prefixes that the new instruction will have
@@ -383,6 +410,7 @@ private:
             4,
             decoded_instruction.length
           });
+          CHUM_LOG_SPAM("[+] Pushed forward target: +0x%X.\n", target_virtual_offset);
         }
       }
       // branch instructions (that don't use memory accesses)
@@ -414,6 +442,7 @@ private:
             static_cast<std::uint8_t>(operand_size),
             static_cast<std::uint8_t>(new_instruction_length)
           });
+          CHUM_LOG_SPAM("[+] Pushed forward target: +0x%X.\n", target_virtual_offset);
         }
       }
       else {
@@ -430,7 +459,7 @@ private:
       CHUM_LOG_SPAM("[+] Encoded a new relative instruction at 0x%p:\n",
         cb.final_virtual_address);
 
-      while (!forward_targets.empty() && forward_targets.top().virtual_offset <= cb.virtual_offset + cb.file_size) {
+      while (!forward_targets.empty() && forward_targets.top().virtual_offset < cb.virtual_offset + cb.file_size) {
         auto const target = forward_targets.top();
         forward_targets.pop();
 
@@ -452,11 +481,17 @@ private:
           memcpy(target.instruction_address + target.patch_offset, &value, 4);
         }
 
-        CHUM_LOG_INFO("[+] Fixed forward target.\n");
+        CHUM_LOG_SPAM("[+] Fixed forward target.\n");
+
+        if (target.virtual_offset == 0x10E5)
+          __debugbreak();
       }
     }
 
     fix_imports();
+
+    for (auto const& cb : code_blocks_)
+      print_code_block(cb);
 
     return true;
   }
@@ -674,6 +709,9 @@ private:
           file_buffer_.size() - file_offset - instruction_offset, &decoded_instruction);
 
         if (ZYAN_FAILED(status)) {
+          if (cb->file_size <= 0)
+            code_blocks_.pop_back();
+
           CHUM_LOG_WARNING("[+] Failed to decode instruction.\n");
           break;
         }
@@ -698,10 +736,12 @@ private:
 
         // TODO: filter out useless instructions (i.e. NOP)
 
-        if (decoded_instruction.mnemonic == ZYDIS_MNEMONIC_LEA &&
-            decoded_instruction.attributes & ZYDIS_ATTRIB_IS_RELATIVE) {
-          CHUM_LOG_SPAM("[!] FROG!\n");
-        }
+        if (decoded_instruction.attributes & ZYDIS_ATTRIB_IS_RELATIVE && decoded_instruction.raw.disp.size != 0)
+          CHUM_LOG_SPAM("[!] FISH!\n");
+        //if (decoded_instruction.mnemonic == ZYDIS_MNEMONIC_LEA &&
+            //decoded_instruction.attributes & ZYDIS_ATTRIB_IS_RELATIVE) {
+          //CHUM_LOG_SPAM("[!] FROG!\n");
+        //}
 
         // these instructions reference more code that we want to recursively
         // disassemble (i.e. CALL, JMP, JCC).

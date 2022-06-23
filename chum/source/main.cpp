@@ -7,7 +7,7 @@
 #include <chrono>
 #include <Windows.h>
 
-#define CHUM_LOG_SPAM(...) printf(__VA_ARGS__)
+#define CHUM_LOG_SPAM(...) (void)0 //printf(__VA_ARGS__)
 #define CHUM_LOG_INFO(...) printf(__VA_ARGS__)
 #define CHUM_LOG_WARNING(...) printf(__VA_ARGS__)
 #define CHUM_LOG_ERROR(...) printf(__VA_ARGS__)
@@ -253,7 +253,7 @@ private:
 
         memcpy(db.final_virtual_address, &file_buffer_[db.file_offset], size);
 
-        CHUM_LOG_INFO("[+] Copied 0x%.6X data bytes from +0x%.8X to 0x%p.\n",
+        CHUM_LOG_SPAM("[+] Copied 0x%.6X data bytes from +0x%.8X to 0x%p.\n",
           size, db.virtual_offset, db.final_virtual_address);
       }
 
@@ -330,7 +330,7 @@ private:
             memcpy(target.instruction_address + target.patch_offset, &value, 4);
           }
 
-          CHUM_LOG_INFO("[+] Fixed forward target.\n");
+          CHUM_LOG_SPAM("[+] Fixed forward target.\n");
         }
 
         continue;
@@ -395,10 +395,10 @@ private:
           return false;
         }
 
-        if (fully_resolved) {
-          new_instruction_length = decoded_instruction.length;
-          memcpy(new_instruction, &file_buffer_[cb.file_offset], new_instruction_length);
+        new_instruction_length = decoded_instruction.length;
+        memcpy(new_instruction, &file_buffer_[cb.file_offset], new_instruction_length);
 
+        if (fully_resolved) {
           auto const value = static_cast<std::int32_t>(delta);
           memcpy(new_instruction + decoded_instruction.raw.disp.offset, &value, 4);
         }
@@ -482,16 +482,10 @@ private:
         }
 
         CHUM_LOG_SPAM("[+] Fixed forward target.\n");
-
-        if (target.virtual_offset == 0x10E5)
-          __debugbreak();
       }
     }
 
     fix_imports();
-
-    for (auto const& cb : code_blocks_)
-      print_code_block(cb);
 
     return true;
   }
@@ -716,7 +710,7 @@ private:
           break;
         }
 
-        if (true)
+        if (false)
         {
           char str[256];
           auto const length = disassemble_and_format(
@@ -1153,13 +1147,14 @@ private:
   void print_code_block(code_block const& cb) const {
     printf("[+] Code block:\n");
 
-    printf("[+]   is_relative    = %d.\n", cb.is_relative);
-    printf("[+]   virtual_offset = 0x%X.\n", cb.virtual_offset);
-    printf("[+]   file_offset    = 0x%X.\n", cb.file_offset);
-    printf("[+]   file_size      = 0x%X.\n", cb.file_size);
+    printf("[+]   is_relative           = %d.\n", cb.is_relative);
+    printf("[+]   virtual_offset        = 0x%X.\n", cb.virtual_offset);
+    printf("[+]   file_offset           = 0x%X.\n", cb.file_offset);
+    printf("[+]   file_size             = 0x%X.\n", cb.file_size);
+    printf("[+]   final_virtual_address = 0x%p.\n", cb.final_virtual_address);
 
     if (cb.is_relative)
-      printf("[+]   expected_size  = 0x%X.\n", cb.final_size);
+      printf("[+]   expected_size         = 0x%X.\n", cb.final_size);
 
     printf("[+]   instructions:\n");
 
@@ -1212,13 +1207,13 @@ private:
 int main() {
   auto const start_time = std::chrono::high_resolution_clock::now();
 
-  //chum_parser chum("C:/Users/realj/Desktop/ntoskrnl (19041.1110).exe");
-  //chum.add_code_region(VirtualAlloc(nullptr, 0x1'000'000, MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE), 0x1'000'000);
-  //chum.add_data_region(VirtualAlloc(nullptr, 0x1'000'000, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE),         0x1'000'000);
+  chum_parser chum("C:/Users/realj/Desktop/ntoskrnl (19041.1110).exe");
+  chum.add_code_region(VirtualAlloc(nullptr, 0x1'000'000, MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE), 0x1'000'000);
+  chum.add_data_region(VirtualAlloc(nullptr, 0x1'000'000, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE),         0x1'000'000);
 
-  chum_parser chum("./hello-world-x64.dll");
-  chum.add_code_region(VirtualAlloc(nullptr, 0x4000, MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE), 0x4000);
-  chum.add_data_region(VirtualAlloc(nullptr, 0x4000, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE),         0x4000);
+  //chum_parser chum("./hello-world-x64.dll");
+  //chum.add_code_region(VirtualAlloc(nullptr, 0x4000, MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE), 0x4000);
+  //chum.add_data_region(VirtualAlloc(nullptr, 0x4000, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE),         0x4000);
 
   auto const end_time = std::chrono::high_resolution_clock::now();
   CHUM_LOG_INFO("[+] Time elapsed: %zums\n", std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time).count());
@@ -1236,5 +1231,7 @@ int main() {
   entry_point(nullptr, DLL_PROCESS_ATTACH, nullptr);
 
   printf("chum.\n");
+
+  system("pause");
 }
 

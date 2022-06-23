@@ -3,6 +3,7 @@
 #include <vector>
 #include <fstream>
 #include <queue>
+#include <deque>
 #include <chrono>
 #include <Windows.h>
 
@@ -621,8 +622,11 @@ private:
     };
 
     // essentially a queue of RVAs that need to be processed
-    std::vector<std::uint32_t> process_queue = {};
+    std::deque<std::uint32_t> process_queue = {};
 
+    // add every RUNTIME_FUNCTION to the initial queue. this covers every
+    // non-leaf function, while everything else will (hopefully) be discovered
+    // through the recursive disassembler.
     for (std::size_t i = 0; i < runtime_funcs_count_; ++i) {
       // TODO: might be useful to add the exception filter as well
       process_queue.emplace_back(runtime_funcs_[i].BeginAddress);
@@ -634,10 +638,15 @@ private:
     // correct in those cases (and spawn a new code block).
     std::vector<bool> already_disassembled(nt_header_->OptionalHeader.SizeOfImage, false);
 
+    std::size_t decoded_instruction_count = 0;
+
+    // process every block in the queue, and whenever we encounter an
+    // instruction that references more code, add it to be processed as well.
     while (!process_queue.empty()) {
       auto const block_offset = process_queue.back();
       process_queue.pop_back();
 
+      // ignore blocks that we have already disassembled
       if (already_disassembled[block_offset])
         continue;
 
@@ -652,7 +661,9 @@ private:
 
       // keep decoding until we reach an exit-point
       for (std::uint32_t instruction_offset = 0; true;) {
+        // mark this instruction as disassembled
         already_disassembled[block_offset + instruction_offset] = true;
+        ++decoded_instruction_count;
 
         ZydisDecodedInstruction decoded_instruction;
 
@@ -667,7 +678,7 @@ private:
           break;
         }
 
-        if (false)
+        if (true)
         {
           char str[256];
           auto const length = disassemble_and_format(
@@ -687,6 +698,11 @@ private:
 
         // TODO: filter out useless instructions (i.e. NOP)
 
+        if (decoded_instruction.mnemonic == ZYDIS_MNEMONIC_LEA &&
+            decoded_instruction.attributes & ZYDIS_ATTRIB_IS_RELATIVE) {
+          CHUM_LOG_SPAM("[!] FROG!\n");
+        }
+
         // these instructions reference more code that we want to recursively
         // disassemble (i.e. CALL, JMP, JCC).
         if (decoded_instruction.raw.imm[0].is_relative) {
@@ -697,7 +713,14 @@ private:
           auto const target = static_cast<std::uint32_t>(block_offset + instruction_offset +
             decoded_instruction.length + decoded_instruction.raw.imm[0].value.s);
 
-          process_queue.push_back(target);
+          // these targets are likely to be the start of functions so they
+          // should be disassembled first. this isn't really required, but
+          // it helps prevent overlapping code blocks.
+          if (decoded_instruction.meta.category == ZYDIS_CATEGORY_CALL ||
+              decoded_instruction.meta.category == ZYDIS_CATEGORY_UNCOND_BR)
+            process_queue.push_front(target);
+          else
+            process_queue.push_back(target);
 
           CHUM_LOG_SPAM("[+]       Marking target to be later processed: +0x%X.\n", target);
         }
@@ -752,6 +775,41 @@ private:
         }
       }
     }
+
+    // sort the code blocks for quicker lookup
+    std::sort(begin(code_blocks_), end(code_blocks_),
+      [](auto const& left, auto const& right) {
+        return left.virtual_offset < right.virtual_offset;
+      });
+
+    // TODO: merge/eliminate overlapping code blocks
+
+    // create a list of data blocks
+    for (std::size_t i = 0; i < nt_header_->FileHeader.NumberOfSections; ++i) {
+      auto const& section = sections_[i];
+
+      // ignore sections that are executable
+      if (section.Characteristics & IMAGE_SCN_MEM_EXECUTE)
+        continue;
+
+      assert(section.Characteristics & IMAGE_SCN_MEM_READ);
+
+      data_block block = {};
+      block.final_virtual_address = nullptr;
+      block.virtual_offset        = section.VirtualAddress;
+      block.file_offset           = section.PointerToRawData;
+      block.file_size             = section.SizeOfRawData;
+      block.virtual_size          = section.Misc.VirtualSize;
+
+      data_blocks_.push_back(block);
+    }
+
+    CHUM_LOG_INFO("[+] Number of runtime functions:    %zu.\n", runtime_funcs_count_);
+    CHUM_LOG_INFO("[+] Number of decoded instructions: %zu.\n", decoded_instruction_count);
+    CHUM_LOG_INFO("[+] Number of data blocks:          %zu (0x%zX bytes).\n",
+      data_blocks_.size(), data_blocks_.size() * sizeof(data_block));
+    CHUM_LOG_INFO("[+] Number of code blocks:          %zu (0x%zX bytes).\n",
+      code_blocks_.size(), code_blocks_.size() * sizeof(code_block));
 
     return true;
   }
@@ -1124,8 +1182,6 @@ int main() {
 
   auto const end_time = std::chrono::high_resolution_clock::now();
   CHUM_LOG_INFO("[+] Time elapsed: %zums\n", std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time).count());
-
-  return 0;
 
   if (!chum.write())
     CHUM_LOG_ERROR("[!] Failed to write binary to memory.\n");

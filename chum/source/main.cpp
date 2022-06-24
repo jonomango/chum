@@ -632,6 +632,7 @@ private:
   }
 
   bool parse2() {
+    // TODO: dont use a lambda for this (its weird)
     // creates an empty, non-relative code block at the specified RVA/file offset
     auto const create_empty_code_block = [this](
         std::uint32_t const rva, std::uint32_t const file_offset) {
@@ -650,6 +651,75 @@ private:
       return cb;
     };
 
+    // TODO: dont use a lambda for this (its weird)
+    auto const is_in_exec_section = [this](std::uint32_t const rva) -> bool {
+      for (std::size_t i = 0; i < nt_header_->FileHeader.NumberOfSections; ++i) {
+        auto const& s = sections_[i];
+
+        if (rva >= s.VirtualAddress && rva < s.VirtualAddress + s.Misc.VirtualSize)
+          return s.Characteristics & IMAGE_SCN_MEM_EXECUTE;
+      }
+
+      return false;
+    };
+
+    // determine whether the current instruction is the last in a code block
+    auto const is_exit_point = [this](ZydisDecodedInstruction const& instr,
+        std::uint32_t const file_offset) -> bool {
+      switch (instr.meta.category) {
+      case ZYDIS_CATEGORY_RET:
+      case ZYDIS_CATEGORY_UNCOND_BR:
+        return true;
+
+      case ZYDIS_CATEGORY_CALL:
+        // heuristic for a call to a non-returning function:
+        // 
+        //   CALL (relative)
+        //   NOPs
+        //   INT3
+        // 
+
+        if (!(instr.attributes & ZYDIS_ATTRIB_IS_RELATIVE))
+          return false;
+
+        for (std::size_t offset = 0; true;) {
+          // keep decoding until we reach a non-NOP instruction
+          ZydisDecodedInstruction curr_instr;
+          auto const status = ZydisDecoderDecodeInstruction(&decoder_, nullptr,
+            &file_buffer_[file_offset + instr.length + offset], 15, &curr_instr);
+
+          if (ZYAN_FAILED(status))
+            return false;
+
+          if (curr_instr.mnemonic != ZYDIS_MNEMONIC_NOP) {
+            // we didn't find any NOPs between the CALL and the INT3
+            if (offset <= 0)
+              return false;
+
+            return file_buffer_[file_offset + offset + instr.length] == 0xCC;
+          }
+
+          offset += curr_instr.length;
+        }
+
+        return false;
+
+      case ZYDIS_CATEGORY_INTERRUPT:
+        // RtlFailFast
+        if (instr.raw.imm[0].value.s == 0x29)
+          return true;
+
+        // a sequence of 2+ INT3 instructions can be considered deadcode
+        // (although the first 0xCC will still be included, just in case)
+        if (file_buffer_[file_offset] == 0xCC && file_buffer_[file_offset + 1] == 0xCC)
+          return true;
+
+        return false;
+      }
+
+      return false;
+    };
+
     // essentially a queue of RVAs that need to be processed
     std::deque<std::uint32_t> process_queue = {};
 
@@ -657,8 +727,15 @@ private:
     // non-leaf function, while everything else will (hopefully) be discovered
     // through the recursive disassembler.
     for (std::size_t i = 0; i < runtime_funcs_count_; ++i) {
+      auto const rva  = runtime_funcs_[i].BeginAddress;
+      auto const size = runtime_funcs_[i].EndAddress - runtime_funcs_[i].BeginAddress;
+
+      // for some reason, some entries point to a single 0xCC
+      if (file_buffer_[rva_to_file_offset(rva)] == 0xCC && size == 1)
+        continue;
+
       // TODO: might be useful to add the exception filter as well
-      process_queue.emplace_back(runtime_funcs_[i].BeginAddress);
+      process_queue.emplace_back(rva);
     }
 
     // lookup table for whether the START of an instruction has already
@@ -667,13 +744,14 @@ private:
     // correct in those cases (and spawn a new code block).
     std::vector<bool> already_disassembled(nt_header_->OptionalHeader.SizeOfImage, false);
 
-    std::size_t decoded_instruction_count = 0;
+    std::size_t decoded_instruction_count        = 0;
+    std::size_t unique_decoded_instruction_count = 0;
 
     // process every block in the queue, and whenever we encounter an
     // instruction that references more code, add it to be processed as well.
     while (!process_queue.empty()) {
-      auto const block_offset = process_queue.back();
-      process_queue.pop_back();
+      auto const block_offset = process_queue.front();
+      process_queue.pop_front();
 
       // ignore blocks that we have already disassembled
       if (already_disassembled[block_offset])
@@ -690,6 +768,9 @@ private:
 
       // keep decoding until we reach an exit-point
       for (std::uint32_t instruction_offset = 0; true;) {
+        if (!already_disassembled[block_offset + instruction_offset])
+          ++unique_decoded_instruction_count;
+
         // mark this instruction as disassembled
         already_disassembled[block_offset + instruction_offset] = true;
         ++decoded_instruction_count;
@@ -716,31 +797,21 @@ private:
           auto const length = disassemble_and_format(
             &file_buffer_[file_offset + instruction_offset], 15, str, 256);
 
-          CHUM_LOG_SPAM("[+]     +%.6X: ", block_offset + instruction_offset);
+          printf("[+]     +%.6X: ", block_offset + instruction_offset);
           for (std::size_t i = 0; i < length; ++i)
-            CHUM_LOG_SPAM(" %.2X", file_buffer_[file_offset + instruction_offset + i]);
+            printf(" %.2X", file_buffer_[file_offset + instruction_offset + i]);
           for (std::size_t i = 0; i < (15 - length); ++i)
-            CHUM_LOG_SPAM("   ");
-          CHUM_LOG_SPAM(" %s.\n", str);
+            printf("   ");
+          printf(" %s.\n", str);
         }
 
-        // TODO: we might also want to find memory references in order to
-        // better separate code from data. i.e. CALL [RIP+0x69] means that
-        // there is data, not code, at RIP+0x69.
-
         // TODO: filter out useless instructions (i.e. NOP)
-
-        if (decoded_instruction.attributes & ZYDIS_ATTRIB_IS_RELATIVE && decoded_instruction.raw.disp.size != 0)
-          CHUM_LOG_SPAM("[!] FISH!\n");
-        //if (decoded_instruction.mnemonic == ZYDIS_MNEMONIC_LEA &&
-            //decoded_instruction.attributes & ZYDIS_ATTRIB_IS_RELATIVE) {
-          //CHUM_LOG_SPAM("[!] FROG!\n");
-        //}
 
         // these instructions reference more code that we want to recursively
         // disassemble (i.e. CALL, JMP, JCC).
         if (decoded_instruction.raw.imm[0].is_relative) {
           assert(decoded_instruction.raw.imm[0].is_signed);
+          assert(decoded_instruction.operand_count_visible == 1);
           assert(decoded_instruction.meta.branch_type != ZYDIS_BRANCH_TYPE_NONE ||
             decoded_instruction.mnemonic == ZYDIS_MNEMONIC_XBEGIN);
 
@@ -757,6 +828,30 @@ private:
             process_queue.push_back(target);
 
           CHUM_LOG_SPAM("[+]       Marking target to be later processed: +0x%X.\n", target);
+        }
+
+        // TODO: we might also want to find memory references in order to
+        // better separate code from data. i.e. CALL [RIP+0x69] means that
+        // there is data, not code, at RIP+0x69.
+
+        // these instructions mostly reference data, but sometimes they
+        // reference code that we may want to disassemble.
+        if (false && decoded_instruction.attributes & ZYDIS_ATTRIB_IS_RELATIVE && decoded_instruction.raw.disp.size != 0) {
+          auto const target = static_cast<std::uint32_t>(block_offset + instruction_offset +
+            decoded_instruction.length + decoded_instruction.raw.imm[0].value.s);
+
+          if (is_in_exec_section(target)) {
+            char str[256];
+            auto const length = disassemble_and_format(
+              &file_buffer_[file_offset + instruction_offset], 15, str, 256);
+
+            CHUM_LOG_INFO("[+]     %d +%.6X: ", decoded_instruction.operand_width, block_offset + instruction_offset);
+            for (std::size_t i = 0; i < length; ++i)
+              CHUM_LOG_INFO(" %.2X", file_buffer_[file_offset + instruction_offset + i]);
+            for (std::size_t i = 0; i < (15 - length); ++i)
+              CHUM_LOG_INFO("   ");
+            CHUM_LOG_INFO(" %s.\n", str);
+          }
         }
 
         // a relative code block can only contain a single instruction, so
@@ -791,22 +886,20 @@ private:
           cb->expected_size += decoded_instruction.length;
         }
 
-        instruction_offset += decoded_instruction.length;
-
-        // these instructions are "exit-points." no instructions that reside
-        // after will be executed, so we should stop decoding.
-        if (decoded_instruction.meta.category == ZYDIS_CATEGORY_RET ||
-            decoded_instruction.meta.category == ZYDIS_CATEGORY_INTERRUPT ||
-            decoded_instruction.meta.category == ZYDIS_CATEGORY_UNCOND_BR) {
-          // this probably means that we missed an exit-point (maybe a jump
-          // table or something) that needs to be investigated. it could also
-          // just be a real debug instruction that really is part of the code.
-          //assert(decoded_instruction.opcode != 0xCC);
-
-          // TODO: INT1/INT3/INT2E might not be exit-points.
+        // this instruction is an exit-point, which means there are no
+        // more meaningful instructions following here.
+        if (is_exit_point(decoded_instruction, file_offset + instruction_offset)) {
           CHUM_LOG_SPAM("[+]       Exit point detected.\n");
           break;
         }
+        else {
+          if (decoded_instruction.meta.category == ZYDIS_CATEGORY_INTERRUPT) {
+            print_code_block(*cb);
+            CHUM_LOG_INFO("INTERRUPT DETECTED!\n");
+          }
+        }
+
+        instruction_offset += decoded_instruction.length;
       }
     }
 
@@ -838,12 +931,22 @@ private:
       data_blocks_.push_back(block);
     }
 
-    CHUM_LOG_INFO("[+] Number of runtime functions:    %zu.\n", runtime_funcs_count_);
-    CHUM_LOG_INFO("[+] Number of decoded instructions: %zu.\n", decoded_instruction_count);
-    CHUM_LOG_INFO("[+] Number of data blocks:          %zu (0x%zX bytes).\n",
+    CHUM_LOG_INFO("[+] Number of runtime functions:           %zu.\n", runtime_funcs_count_);
+    CHUM_LOG_INFO("[+] Number of decoded instructions:        %zu.\n", decoded_instruction_count);
+    CHUM_LOG_INFO("[+] Number of unique decoded instructions: %zu.\n", unique_decoded_instruction_count);
+    CHUM_LOG_INFO("[+] Number of data blocks:                 %zu (0x%zX bytes).\n",
       data_blocks_.size(), data_blocks_.size() * sizeof(data_block));
-    CHUM_LOG_INFO("[+] Number of code blocks:          %zu (0x%zX bytes).\n",
+    CHUM_LOG_INFO("[+] Number of code blocks:                 %zu (0x%zX bytes).\n",
       code_blocks_.size(), code_blocks_.size() * sizeof(code_block));
+
+    /*
+    std::sort(begin(sorted_rvas), end(sorted_rvas));
+    sorted_rvas.erase(unique(begin(sorted_rvas), end(sorted_rvas)), end(sorted_rvas));
+    std::ofstream penis_cum("penis-cum.txt");
+    for (auto const rva : sorted_rvas)
+      penis_cum << "0x" << std::hex << rva << "\n";
+    penis_cum.close();
+    */
 
     return true;
   }
@@ -1207,7 +1310,7 @@ private:
 int main() {
   auto const start_time = std::chrono::high_resolution_clock::now();
 
-  chum_parser chum("C:/Users/realj/Desktop/ntoskrnl (19041.1110).exe");
+  chum_parser chum("C:/Users/realj/Desktop/win32kfull (lizerd).sys");
   chum.add_code_region(VirtualAlloc(nullptr, 0x1'000'000, MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE), 0x1'000'000);
   chum.add_data_region(VirtualAlloc(nullptr, 0x1'000'000, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE),         0x1'000'000);
 
@@ -1217,6 +1320,8 @@ int main() {
 
   auto const end_time = std::chrono::high_resolution_clock::now();
   CHUM_LOG_INFO("[+] Time elapsed: %zums\n", std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time).count());
+
+  return 0;
 
   if (!chum.write())
     CHUM_LOG_ERROR("[!] Failed to write binary to memory.\n");

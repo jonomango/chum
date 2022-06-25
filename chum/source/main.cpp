@@ -744,8 +744,7 @@ private:
     // correct in those cases (and spawn a new code block).
     std::vector<bool> already_disassembled(nt_header_->OptionalHeader.SizeOfImage, false);
 
-    std::size_t decoded_instruction_count        = 0;
-    std::size_t unique_decoded_instruction_count = 0;
+    std::size_t decoded_instruction_count = 0;
 
     // process every block in the queue, and whenever we encounter an
     // instruction that references more code, add it to be processed as well.
@@ -768,8 +767,8 @@ private:
 
       // keep decoding until we reach an exit-point
       for (std::uint32_t instruction_offset = 0; true;) {
-        if (!already_disassembled[block_offset + instruction_offset])
-          ++unique_decoded_instruction_count;
+        if (already_disassembled[block_offset + instruction_offset])
+          break;
 
         // mark this instruction as disassembled
         already_disassembled[block_offset + instruction_offset] = true;
@@ -931,12 +930,11 @@ private:
       data_blocks_.push_back(block);
     }
 
-    CHUM_LOG_INFO("[+] Number of runtime functions:           %zu.\n", runtime_funcs_count_);
-    CHUM_LOG_INFO("[+] Number of decoded instructions:        %zu.\n", decoded_instruction_count);
-    CHUM_LOG_INFO("[+] Number of unique decoded instructions: %zu.\n", unique_decoded_instruction_count);
-    CHUM_LOG_INFO("[+] Number of data blocks:                 %zu (0x%zX bytes).\n",
+    CHUM_LOG_INFO("[+] Number of runtime functions:    %zu.\n", runtime_funcs_count_);
+    CHUM_LOG_INFO("[+] Number of decoded instructions: %zu.\n", decoded_instruction_count);
+    CHUM_LOG_INFO("[+] Number of data blocks:          %zu (0x%zX bytes).\n",
       data_blocks_.size(), data_blocks_.size() * sizeof(data_block));
-    CHUM_LOG_INFO("[+] Number of code blocks:                 %zu (0x%zX bytes).\n",
+    CHUM_LOG_INFO("[+] Number of code blocks:          %zu (0x%zX bytes).\n",
       code_blocks_.size(), code_blocks_.size() * sizeof(code_block));
 
     /*
@@ -1310,18 +1308,18 @@ private:
 int main() {
   auto const start_time = std::chrono::high_resolution_clock::now();
 
-  chum_parser chum("C:/Users/realj/Desktop/win32kfull (lizerd).sys");
-  chum.add_code_region(VirtualAlloc(nullptr, 0x1'000'000, MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE), 0x1'000'000);
-  chum.add_data_region(VirtualAlloc(nullptr, 0x1'000'000, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE),         0x1'000'000);
+  //chum_parser chum("C:/Users/realj/Desktop/win32kfull (lizerd).sys");
+  //chum.add_code_region(VirtualAlloc(nullptr, 0x1'000'000, MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE), 0x1'000'000);
+  //chum.add_data_region(VirtualAlloc(nullptr, 0x1'000'000, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE),         0x1'000'000);
 
-  //chum_parser chum("./hello-world-x64.dll");
-  //chum.add_code_region(VirtualAlloc(nullptr, 0x4000, MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE), 0x4000);
-  //chum.add_data_region(VirtualAlloc(nullptr, 0x4000, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE),         0x4000);
+  chum_parser chum("./hello-world-x64.dll");
+  chum.add_code_region(VirtualAlloc(nullptr, 0x4000, MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE), 0x4000);
+  chum.add_data_region(VirtualAlloc(nullptr, 0x4000, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE),         0x4000);
 
   auto const end_time = std::chrono::high_resolution_clock::now();
   CHUM_LOG_INFO("[+] Time elapsed: %zums\n", std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time).count());
 
-  return 0;
+  //return 0;
 
   if (!chum.write())
     CHUM_LOG_ERROR("[!] Failed to write binary to memory.\n");

@@ -1,7 +1,10 @@
 #pragma once
 
-#include <Zydis/Zydis.h>
+#include "block.h"
+
 #include <vector>
+
+#include <Zydis/Zydis.h>
 
 namespace chum {
 
@@ -9,12 +12,23 @@ namespace chum {
 // x86-64 binary.
 class binary {
 public:
-  // Initialize the current binary by disassembling the provided PE image.
-  bool disassemble(char const* path);
+  // Create an empty binary.
+  binary();
+
+  // Initialize the current binary with a 64-bit PE image.
+  bool load(char const* path);
+
+  // Print the contents of this binary, for debugging purposes.
+  void print() const;
+
+  // Create and initialize a new data block.
+  data_block& create_data_block(std::uint32_t size, std::uint32_t alignment = 1);
 
 private:
-  // Return the raw contents of a file.
-  static std::vector<std::uint8_t> read_file_to_buffer(char const* path);
+  ZydisDecoder decoder_;
+
+  // Every piece of data that makes up this binary.
+  std::vector<data_block> data_blocks_;
 };
 
 } // namespace chum

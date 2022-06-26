@@ -3,11 +3,20 @@
 int main() {
   chum::binary binary;
 
-  if (!binary.disassemble("hello-world-x64.dll")) {
-    std::printf("[!] Failed to disassemble binary.\n");
+  auto& db = binary.create_data_block(100);
+
+  db.alignment = 100;
+  db.read_only = 1;
+
+  binary.print();
+
+  if (!binary.load("hello-world-x64.dll")) {
+    std::printf("[!] Failed to load binary.\n");
     return 0;
   }
 
-  std::printf("[+] Disassembled binary.\n");
+  std::printf("[+] Binary loaded.\n");
+
+  binary.print();
 }
 

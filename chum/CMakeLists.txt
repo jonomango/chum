@@ -1,5 +1,11 @@
 add_executable(chum
   "source/main.cpp"
+  "source/chum.h"
+  "source/chum.cpp"
+  "source/block.h"
+  "source/block.cpp"
+  "source/instruction.h"
+  "source/instruction.cpp"
 )
 
 # C++17, C11

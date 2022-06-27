@@ -258,11 +258,18 @@ bool binary::disassemble(disassembler_context& ctx) {
 
   // Add the specified RVA to the disassembly queue.
   auto const enqueue_code_rva = [&](
-      std::uint32_t const rva, char const* const name = nullptr) {
+      std::uint32_t const rva, char const* name = nullptr) {
     disassembly_queue.push(rva);
 
     // Make sure we're not creating a duplicate symbol.
     assert(ctx.rva_to_sym[rva] == nullptr);
+
+    // Auto-generate a name for this symbol if none was provided.
+    char generated_sym_name[32] = { 0 };
+    if (!name) {
+      sprintf_s(generated_sym_name, "loc_0x%X", rva);
+      name = generated_sym_name;
+    }
 
     // Create a new symbol that will point to the start of this basic block.
     auto const sym = ctx.rva_to_sym[rva] =
@@ -336,7 +343,7 @@ bool binary::disassemble(disassembler_context& ctx) {
 
           // This is undiscovered code, add it to the disassembly queue.
           if (!target_sym)
-            target_sym = enqueue_code_rva(target_rva, "<branch-target>");
+            target_sym = enqueue_code_rva(target_rva);
 
           assert(target_sym->type == symbol_type::code);
         }
@@ -355,8 +362,22 @@ bool binary::disassemble(disassembler_context& ctx) {
 
           // This is the first reference to this address, create a new symbol
           // for it.
-          if (!target_sym)
-            target_sym = create_symbol(symbol_type::data, "<memory-reference>");
+          if (!target_sym) {
+            auto map_entry = rva_to_db_map_entry(ctx, target_rva);
+
+            // This memory address isn't in a data section... is this code maybe?
+            assert(map_entry != nullptr);
+
+            // Create a name for this symbol that contains the target RVA.
+            char symbol_name[32] = { 0 };
+            sprintf_s(symbol_name, "unk_0x%X", target_rva);
+
+            // Create the new symbol.
+            target_sym = ctx.rva_to_sym[target_rva] =
+              create_symbol(symbol_type::data, symbol_name);
+            target_sym->db     = map_entry->db;
+            target_sym->offset = target_rva - map_entry->rva;
+          }
 
           // TODO: This isn't correct, but it's just for testing.
           assert(target_sym->type == symbol_type::data);
@@ -398,7 +419,7 @@ bool binary::disassemble(disassembler_context& ctx) {
           if (auto const sym = ctx.rva_to_sym[fallthrough_rva])
             curr_bb->fallthrough_target = sym->bb;
           else
-            curr_bb->fallthrough_target = enqueue_code_rva(fallthrough_rva, "<fallthrough-target>")->bb;
+            curr_bb->fallthrough_target = enqueue_code_rva(fallthrough_rva)->bb;
         }
 
         break;

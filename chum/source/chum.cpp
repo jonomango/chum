@@ -42,6 +42,9 @@ bool binary::load(char const* const path) {
   // Create the section data blocks before disassembling.
   create_section_data_blocks(ctx);
 
+  // Create symbols for every import.
+  create_import_symbols(ctx);
+
   return disassemble(ctx);
 }
 
@@ -138,6 +141,30 @@ bool binary::init_disassembler_context(
   return true;
 }
 
+// Convert an RVA to its corresponding file offset by iterating over every
+// PE section.
+std::uint32_t binary::rva_to_file_offset(
+    disassembler_context const& ctx, std::uint32_t const rva) {
+  for (std::size_t i = 0; i < ctx.nt_header->FileHeader.NumberOfSections; ++i) {
+    auto const& sec = ctx.sections[i];
+    if (rva >= sec.VirtualAddress && rva < (sec.VirtualAddress + sec.Misc.VirtualSize))
+      return sec.PointerToRawData + (rva - sec.VirtualAddress);
+  }
+
+  return 0;
+}
+
+// Get the data block that the specified RVA lands in, or nullptr if not found.
+binary::db_map_entry const* binary::rva_to_db_map_entry(
+    disassembler_context const& ctx, std::uint32_t const rva) {
+  for (auto const& entry : ctx.db_map) {
+    if (rva >= entry.rva && rva < (entry.rva + entry.size))
+      return &entry;
+  }
+
+  return nullptr;
+}
+
 // Create data blocks for every PE section.
 void binary::create_section_data_blocks(disassembler_context& ctx) {
   for (std::size_t i = 0; i < ctx.nt_header->FileHeader.NumberOfSections; ++i) {
@@ -149,26 +176,78 @@ void binary::create_section_data_blocks(disassembler_context& ctx) {
 
     assert(section.Characteristics & IMAGE_SCN_MEM_READ);
 
-    auto const db = create_data_block(min(section.SizeOfRawData,
-      section.Misc.VirtualSize), ctx.nt_header->OptionalHeader.SectionAlignment);
+    auto const db = create_data_block(section.Misc.VirtualSize,
+      ctx.nt_header->OptionalHeader.SectionAlignment);
+
+    // Zero-initialize the data block.
+    std::memset(db->bytes.data(), 0, section.Misc.VirtualSize);
 
     // Copy the data from file.
     std::memcpy(db->bytes.data(),
-      &ctx.file_buffer[section.PointerToRawData], db->bytes.size());
+      &ctx.file_buffer[section.PointerToRawData],
+      min(section.Misc.VirtualSize, section.SizeOfRawData));
 
     // Can we write to this section?
     db->read_only = !(section.Characteristics & IMAGE_SCN_MEM_WRITE);
 
-    // This is a work-around since the section name wont be null-terminated
-    // if it is exactly 8 bytes long.
-    char section_name[9] = { 0 };
-    std::memcpy(section_name, section.Name, 8);
+    // Create an entry in the RVA to data block map.
+    ctx.db_map.push_back({
+      section.VirtualAddress,
+      section.Misc.VirtualSize,
+      db
+    });
+  }
+}
 
-    // Create a symbol for the start of this data section.
-    auto const sym = create_symbol(symbol_type::data, section_name);
-    ctx.rva_to_sym[section.VirtualAddress] = sym;
-    sym->db                                = db;
-    sym->offset                            = 0;
+// Create data symbols for every PE import.
+void binary::create_import_symbols(disassembler_context& ctx) {
+  auto const import_data_dir = ctx.nt_header->OptionalHeader.DataDirectory[
+    IMAGE_DIRECTORY_ENTRY_IMPORT];
+
+  // No imports. :(
+  if (!import_data_dir.VirtualAddress || import_data_dir.Size <= 0)
+    return;
+
+  // An import descriptor essentially represents a DLL that we are importing from.
+  auto import_descriptor = reinterpret_cast<PIMAGE_IMPORT_DESCRIPTOR>(
+    &ctx.file_buffer[rva_to_file_offset(ctx, import_data_dir.VirtualAddress)]);
+
+  // Iterate over every import descriptor until we hit the null terminator.
+  for (; import_descriptor->OriginalFirstThunk; ++import_descriptor) {
+    // Import DLL name.
+    auto const dll_name = reinterpret_cast<char const*>(&ctx.file_buffer[
+      rva_to_file_offset(ctx, import_descriptor->Name)]);
+
+    // The original first thunk contains the name, while the first thunk
+    // contains the runtime address of the import.
+    auto first_thunk_rva = import_descriptor->FirstThunk;
+    auto orig_first_thunk = reinterpret_cast<PIMAGE_THUNK_DATA>(
+      &ctx.file_buffer[rva_to_file_offset(ctx, import_descriptor->OriginalFirstThunk)]);
+
+    for (; orig_first_thunk->u1.AddressOfData;
+           first_thunk_rva += sizeof(IMAGE_THUNK_DATA), ++orig_first_thunk) {
+      // This contains the null-terminated import name.
+      auto const import_by_name = reinterpret_cast<PIMAGE_IMPORT_BY_NAME>(
+        &ctx.file_buffer[rva_to_file_offset(ctx, static_cast<std::uint32_t>(
+        orig_first_thunk->u1.AddressOfData))]);
+
+      // Create the symbol name.
+      char symbol_name[512] = { 0 };
+      sprintf_s(symbol_name, "%s.%s", dll_name, import_by_name->Name);
+
+      // Create a named symbol for this import, if one doesn't already exist.
+      if (!ctx.rva_to_sym[first_thunk_rva]) {
+        auto const sym = ctx.rva_to_sym[first_thunk_rva] =
+          create_symbol(symbol_type::data, symbol_name);
+
+        // Get the data block that this symbol resides in.
+        auto const map_entry = rva_to_db_map_entry(ctx, first_thunk_rva);
+        assert(map_entry != nullptr);
+
+        sym->db     = map_entry->db;
+        sym->offset = first_thunk_rva - map_entry->rva;
+      }
+    }
   }
 }
 
@@ -196,17 +275,6 @@ bool binary::disassemble(disassembler_context& ctx) {
     return sym;
   };
 
-  // Convert an RVA to a file offset by iterating over every PE section.
-  auto const rva_to_file_offset = [&](std::uint32_t const rva) -> std::uint32_t {
-    for (std::size_t i = 0; i < ctx.nt_header->FileHeader.NumberOfSections; ++i) {
-      auto const& sec = ctx.sections[i];
-      if (rva >= sec.VirtualAddress && rva < (sec.VirtualAddress + sec.Misc.VirtualSize))
-        return sec.PointerToRawData + (rva - sec.VirtualAddress);
-    }
-
-    return 0;
-  };
-
   // Add the entrypoint to the disassembly queue.
   if (ctx.nt_header->OptionalHeader.AddressOfEntryPoint) {
     enqueue_code_rva(
@@ -220,12 +288,12 @@ bool binary::disassemble(disassembler_context& ctx) {
     auto const rva_start = disassembly_queue.front();
     disassembly_queue.pop();
 
-    auto const file_start = rva_to_file_offset(rva_start);
+    auto const file_start = rva_to_file_offset(ctx, rva_start);
 
     // This is the basic block that we're constructing.
     auto const curr_bb = ctx.rva_to_sym[rva_start]->bb;
 
-    //std::printf("[+] Started basic block at RVA 0x%X.\n", rva_start);
+    std::printf("[+] Started basic block at RVA 0x%X.\n", rva_start);
 
     // Keep decoding until we hit a terminating instruction.
     for (std::uint32_t instr_offset = 0;
@@ -252,10 +320,14 @@ bool binary::disassemble(disassembler_context& ctx) {
       // relative operands.
       instruction instr;
 
+      // Rewrite relative instructions to use symbols, as well as adding any
+      // discovered code to be further disassembled.
       if (decoded_instr.attributes & ZYDIS_ATTRIB_IS_RELATIVE) {
-        // A small optimization, since branch instructions can mostly be
+        // A small optimization, since most instructions can be
         // handled without needing to decode operands.
         if (decoded_instr.raw.imm[0].is_relative) {
+          assert(decoded_instr.raw.imm[0].is_signed);
+
           auto const target_rva = static_cast<std::uint32_t>(rva_start +
             instr_offset + decoded_instr.length + decoded_instr.raw.imm[0].value.s);
 
@@ -268,11 +340,42 @@ bool binary::disassemble(disassembler_context& ctx) {
 
           assert(target_sym->type == symbol_type::code);
         }
+        // RIP relative memory references.
+        else if (decoded_instr.raw.disp.offset != 0 &&
+                 decoded_instr.raw.modrm.mod   == 0 &&
+                 decoded_instr.raw.modrm.rm    == 5) {
+          // x86-64 memory references *should* always be 4 bytes, unless im stupid.
+          assert(decoded_instr.raw.disp.size == 32);
+
+          auto const target_rva = static_cast<std::uint32_t>(rva_start +
+            instr_offset + decoded_instr.length + decoded_instr.raw.disp.value);
+
+          // Get the symbol for this memory reference.
+          auto target_sym = ctx.rva_to_sym[target_rva];
+
+          // This is the first reference to this address, create a new symbol
+          // for it.
+          if (!target_sym)
+            target_sym = create_symbol(symbol_type::data, "<memory-reference>");
+
+          // TODO: This isn't correct, but it's just for testing.
+          assert(target_sym->type == symbol_type::data);
+
+          std::printf("[+]   0x%X:", rva_start + instr_offset);
+          for (std::size_t i = 0; i < decoded_instr.length; ++i)
+            std::printf(" %.2X", curr_instr_buffer[i]);
+          std::printf("\n");
+        }
+        else {
+          std::printf("[!] Unhandled relative instruction.\n");
+          return false;
+        }
 
         // Copy the original instruction.
         instr.length = decoded_instr.length;
         std::memcpy(instr.bytes, curr_instr_buffer, instr.length);
-      } else {
+      }
+      else {
         // Copy the original instruction.
         instr.length = decoded_instr.length;
         std::memcpy(instr.bytes, curr_instr_buffer, instr.length);

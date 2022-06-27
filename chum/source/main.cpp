@@ -3,6 +3,7 @@
 int main() {
   chum::binary binary;
 
+  //if (!binary.load("C:\\Users\\realj\\Desktop\\ntoskrnl (19041.1110).exe")) {
   if (!binary.load("hello-world-x64.dll")) {
     std::printf("[!] Failed to load binary.\n");
     return 0;
@@ -10,9 +11,6 @@ int main() {
 
   binary.print();
 
-  // Create data blocks/basic blocks through their constructors, then call
-  // binary.append() or binary.insert() to place them in the binary.
-  //
   // Disassembly algorithm needs to be worked on.
 }
 

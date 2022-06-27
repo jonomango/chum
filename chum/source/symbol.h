@@ -21,19 +21,17 @@ inline constexpr char const* serialize_symbol_type(symbol_type const type) {
   }
 }
 
-// A symbol ID is essentially a pointer to a symbol that can be used to
+// A symbol ID is essentially a handle to a symbol that can be used to
 // quickly lookup the associated symbol.
-struct symbol_id {
-  // Index into the symbol array.
-  std::uint32_t idx;
-};
+using symbol_id = std::uint32_t;
 
-inline constexpr symbol_id invalid_symbol_id{ 0 };
+// This symbol will NEVER point to meaningful data.
+inline constexpr symbol_id null_symbol_id = 0;
 
 // A symbol represents a memory address that is not known until link-time.
 struct symbol {
   // The symbol ID pointing to this symbol.
-  symbol_id id = invalid_symbol_id;
+  symbol_id id = null_symbol_id;
 
   // The symbol type.
   symbol_type type = symbol_type::invalid;

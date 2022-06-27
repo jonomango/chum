@@ -39,6 +39,10 @@ bool binary::load(char const* const path) {
 
   auto const sections = reinterpret_cast<PIMAGE_SECTION_HEADER>(nt_header + 1);
 
+  // Create the invalid symbol at index 0.
+  auto const null_symbol = create_symbol(symbol_type::invalid, "null symbol");
+  assert(null_symbol->id == null_symbol_id);
+
   // Create a data block for each data section.
   for (std::size_t i = 0; i < nt_header->FileHeader.NumberOfSections; ++i) {
     auto const& section = sections[i];
@@ -77,12 +81,12 @@ bool binary::load(char const* const path) {
 void binary::print() const {
   std::printf("[+] Symbols:\n");
   for (auto const sym : symbols_) {
-    std::printf("[+]   ID: %.8u    Type: %.8s",
-      sym->id.idx, serialize_symbol_type(sym->type));
+    std::printf("[+]   ID: %-6u Type: %-8s",
+      sym->id, serialize_symbol_type(sym->type));
 
     // Print the name, if it exists.
     if (!sym->name.empty())
-      std::printf("    Name: %s\n", sym->name.c_str());
+      std::printf(" Name: %s\n", sym->name.c_str());
     else
       std::printf("\n");
   }
@@ -91,7 +95,7 @@ void binary::print() const {
   for (std::size_t i = 0; i < data_blocks_.size(); ++i) {
     auto const db = data_blocks_[i];
 
-    std::printf("[+]   #%zd    Size: 0x%.8zX    Alignment: 0x%.4X    Read-only: %s\n",
+    std::printf("[+]   #%-4zd Size: 0x%-8zX Alignment: 0x%-5X Read-only: %s\n",
       i, db->bytes.size(), db->alignment, db->read_only ? "true" : "false");
   }
 
@@ -124,7 +128,7 @@ data_block* binary::create_data_block(
 symbol* binary::create_symbol(
     symbol_type const type, char const* const name) {
   auto const sym = symbols_.emplace_back(new symbol);
-  sym->id        = symbol_id{ static_cast<std::uint32_t>(symbols_.size() - 1) };
+  sym->id        = static_cast<symbol_id>(symbols_.size() - 1);
   sym->type      = type;
   sym->name      = name ? name : "";
   return sym;

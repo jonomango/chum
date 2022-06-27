@@ -21,7 +21,7 @@ public:
   bool load(char const* path);
 
   // Print the contents of this binary, for debugging purposes.
-  void print() const;
+  void print();
 
   // Create a new basic block that contains no instructions.
   basic_block* create_basic_block();

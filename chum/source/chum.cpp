@@ -5,7 +5,48 @@
 #include <cassert>
 #include <queue>
 
+#include <zycore/Format.h>
+
 namespace chum {
+
+static ZydisFormatterFunc orig_zydis_format_operand_mem = nullptr;
+static ZydisFormatterFunc orig_zydis_format_operand_imm = nullptr;
+
+static ZyanStatus hook_zydis_format_operand_mem(
+    ZydisFormatter const* const formatter,
+    ZydisFormatterBuffer* const buffer, ZydisFormatterContext* const context) {
+  // Call the original function.
+  if (context->operand->mem.base != ZYDIS_REGISTER_RIP)
+    return orig_zydis_format_operand_mem(formatter, buffer, context);
+
+  auto const& sym_table = *reinterpret_cast<std::vector<symbol*>*>(context->user_data);
+  auto const sym = sym_table[context->operand->mem.disp.value];
+
+  ZydisFormatterBufferAppend(buffer, ZYDIS_TOKEN_SYMBOL);
+  ZyanString* string;
+  ZydisFormatterBufferGetString(buffer, &string);
+  ZyanStringAppendFormat(string, "%s", sym->name.c_str());
+
+  return ZYAN_STATUS_SUCCESS;
+}
+
+static ZyanStatus hook_zydis_format_operand_imm(
+    ZydisFormatter const* const formatter,
+    ZydisFormatterBuffer* const buffer, ZydisFormatterContext* const context) {
+  // Call the original function.
+  if (!context->operand->imm.is_relative)
+    return orig_zydis_format_operand_imm(formatter, buffer, context);
+
+  auto const& sym_table = *reinterpret_cast<std::vector<symbol*>*>(context->user_data);
+  auto const sym = sym_table[context->operand->imm.value.u];
+
+  ZydisFormatterBufferAppend(buffer, ZYDIS_TOKEN_SYMBOL);
+  ZyanString* string;
+  ZydisFormatterBufferGetString(buffer, &string);
+  ZyanStringAppendFormat(string, "%s", sym->name.c_str());
+
+  return ZYAN_STATUS_SUCCESS;
+}
 
 // Create an empty binary.
 binary::binary() {
@@ -23,6 +64,14 @@ binary::binary() {
     ZYDIS_FORMATTER_PROP_FORCE_RELATIVE_BRANCHES, true);
   ZydisFormatterSetProperty(&formatter_,
     ZYDIS_FORMATTER_PROP_FORCE_RELATIVE_RIPREL, true);
+
+  orig_zydis_format_operand_mem = hook_zydis_format_operand_mem;
+  ZydisFormatterSetHook(&formatter_, ZYDIS_FORMATTER_FUNC_FORMAT_OPERAND_MEM,
+    reinterpret_cast<void const**>(&orig_zydis_format_operand_mem));
+
+  orig_zydis_format_operand_imm = hook_zydis_format_operand_imm;
+  ZydisFormatterSetHook(&formatter_, ZYDIS_FORMATTER_FUNC_FORMAT_OPERAND_IMM,
+    reinterpret_cast<void const**>(&orig_zydis_format_operand_imm));
 }
 
 // Initialize the current binary with a 64-bit PE image.
@@ -49,7 +98,7 @@ bool binary::load(char const* const path) {
 }
 
 // Print the contents of this binary, for debugging purposes.
-void binary::print() const {
+void binary::print() {
   std::printf("[+] Symbols:\n");
   for (auto const sym : symbols_) {
     std::printf("[+]   ID: %-6u Type: %-8s",
@@ -82,6 +131,26 @@ void binary::print() const {
       std::printf(" Fallthrough symbol: %-6u\n", bb->fallthrough_target->sym_id);
     else
       std::printf("\n");
+
+    // Print every instruction.
+    std::uint32_t instr_offset = 0;
+    for (auto const& instr : bb->instructions) {
+      ZydisDecodedInstruction decoded_instr;
+      ZydisDecodedOperand decoded_operands[ZYDIS_MAX_OPERAND_COUNT_VISIBLE];
+
+      ZydisDecoderDecodeFull(&decoder_, instr.bytes, instr.length,
+        &decoded_instr, decoded_operands, ZYDIS_MAX_OPERAND_COUNT_VISIBLE,
+        ZYDIS_DFLAG_VISIBLE_OPERANDS_ONLY);
+
+      char buffer[128] = { 0 };
+      ZydisFormatterFormatInstructionEx(&formatter_, &decoded_instr,
+        decoded_operands, decoded_instr.operand_count_visible, buffer,
+        128, 0, &symbols_);
+
+      std::printf("[+]     +%.3X: %s\n", instr_offset, buffer);
+
+      instr_offset += instr.length;
+    }
   }
 }
 
@@ -267,7 +336,7 @@ bool binary::disassemble(disassembler_context& ctx) {
     // Auto-generate a name for this symbol if none was provided.
     char generated_sym_name[32] = { 0 };
     if (!name) {
-      sprintf_s(generated_sym_name, "loc_0x%X", rva);
+      sprintf_s(generated_sym_name, "loc_%X", rva);
       name = generated_sym_name;
     }
 
@@ -387,7 +456,7 @@ bool binary::disassemble(disassembler_context& ctx) {
 
             // Create a name for this symbol that contains the target RVA.
             char symbol_name[32] = { 0 };
-            sprintf_s(symbol_name, "unk_0x%X", target_rva);
+            sprintf_s(symbol_name, "unk_%X", target_rva);
 
             // Create the new symbol.
             target_sym = ctx.rva_to_sym[target_rva] =
@@ -412,10 +481,6 @@ bool binary::disassemble(disassembler_context& ctx) {
           std::printf("[!] Unhandled relative instruction.\n");
           return false;
         }
-
-        // Copy the original instruction.
-        instr.length = decoded_instr.length;
-        std::memcpy(instr.bytes, curr_instr_buffer, instr.length);
       }
       else {
         // Copy the original instruction.

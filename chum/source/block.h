@@ -18,7 +18,7 @@ class basic_block {
 public:
 };
 
-// A data block is a contiguous blob of data that shares the same attributes.
+// A data block is a contiguous blob of data.
 struct data_block {
   // The raw data that makes up this block.
   std::vector<std::uint8_t> bytes;

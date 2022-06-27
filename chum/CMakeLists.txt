@@ -6,6 +6,7 @@ add_executable(chum
   "source/block.cpp"
   "source/instruction.h"
   "source/instruction.cpp"
+  "source/symbol.h"
   "source/util.h"
   "source/util.cpp"
 )

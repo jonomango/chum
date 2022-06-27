@@ -49,15 +49,25 @@ bool binary::load(char const* const path) {
 
     assert(section.Characteristics & IMAGE_SCN_MEM_READ);
 
-    auto& db = create_data_block(min(section.SizeOfRawData,
+    auto const db = create_data_block(min(section.SizeOfRawData,
       section.Misc.VirtualSize), nt_header->OptionalHeader.SectionAlignment);
 
     // Copy the data from file.
-    std::memcpy(db.bytes.data(), &file_buffer[section.PointerToRawData],
-      db.bytes.size());
+    std::memcpy(db->bytes.data(), &file_buffer[section.PointerToRawData],
+      db->bytes.size());
 
     // Can we write to this section?
-    db.read_only = !(section.Characteristics & IMAGE_SCN_MEM_WRITE);
+    db->read_only = !(section.Characteristics & IMAGE_SCN_MEM_WRITE);
+
+    // This is a work-around since the section name wont be null-terminated
+    // if it is exactly 8 bytes long.
+    char section_name[9] = { 0 };
+    std::memcpy(section_name, section.Name, 8);
+
+    // Create a symbol for the start of this data section.
+    auto const sym = create_symbol(symbol_type::data, section_name);
+    sym->db     = db;
+    sym->offset = 0;
   }
 
   return true;
@@ -65,26 +75,59 @@ bool binary::load(char const* const path) {
 
 // Print the contents of this binary, for debugging purposes.
 void binary::print() const {
-  std::printf("[+] Data blocks:\n");
+  std::printf("[+] Symbols:\n");
+  for (auto const sym : symbols_) {
+    std::printf("[+]   ID: %.8u    Type: %.8s",
+      sym->id.idx, serialize_symbol_type(sym->type));
 
+    // Print the name, if it exists.
+    if (!sym->name.empty())
+      std::printf("    Name: %s\n", sym->name.c_str());
+    else
+      std::printf("\n");
+  }
+
+  std::printf("[+]\n[+] Data blocks:\n");
   for (std::size_t i = 0; i < data_blocks_.size(); ++i) {
-    auto const& db = data_blocks_[i];
+    auto const db = data_blocks_[i];
 
-    std::printf("[+]   Block %zd:\n", i);
-    std::printf("[+]     Size      = 0x%zX.\n", db.bytes.size());
-    std::printf("[+]     Alignment = 0x%X.\n", db.alignment);
-    std::printf("[+]     Read-only = %s.\n", db.read_only ? "true" : "false");
+    std::printf("[+]   #%zd    Size: 0x%.8zX    Alignment: 0x%.4X    Read-only: %s\n",
+      i, db->bytes.size(), db->alignment, db->read_only ? "true" : "false");
+  }
+
+  std::printf("[+]\n[+] Basic blocks:\n");
+  for (std::size_t i = 0; i < basic_blocks_.size(); ++i) {
+    auto const bb = data_blocks_[i];
+
+    std::printf("[+]   #%zd\n", i);
   }
 }
 
-// Create and initialize a new data block.
-data_block& binary::create_data_block(
+// Create a new basic block that contains no instructions.
+basic_block* binary::create_basic_block() {
+  auto const bb = basic_blocks_.emplace_back(new basic_block);
+
+  return bb;
+}
+
+// Create a new data block with uninitialized data.
+data_block* binary::create_data_block(
     std::uint32_t const size, std::uint32_t const alignment) {
-  auto& db = data_blocks_.emplace_back();
-  db.bytes     = std::vector<std::uint8_t>(size, 0);
-  db.alignment = alignment;
-  db.read_only = false;
+  auto const db = data_blocks_.emplace_back(new data_block);
+  db->bytes     = std::vector<std::uint8_t>(size, 0);
+  db->alignment = alignment;
+  db->read_only = false;
   return db;
+}
+
+// Create a new symbol.
+symbol* binary::create_symbol(
+    symbol_type const type, char const* const name) {
+  auto const sym = symbols_.emplace_back(new symbol);
+  sym->id        = symbol_id{ static_cast<std::uint32_t>(symbols_.size() - 1) };
+  sym->type      = type;
+  sym->name      = name ? name : "";
+  return sym;
 }
 
 } // namespace chum

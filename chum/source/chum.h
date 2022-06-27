@@ -57,6 +57,7 @@ private:
 
 private:
   ZydisDecoder decoder_;
+  ZydisFormatter formatter_;
 
   // Every symbol that makes up this binary. These are accessed with symbol IDs.
   std::vector<symbol*> symbols_;

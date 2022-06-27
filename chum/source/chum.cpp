@@ -12,6 +12,17 @@ binary::binary() {
   // Initialize the Zydis decoder for x86-64.
   assert(ZYAN_SUCCESS(ZydisDecoderInit(&decoder_,
     ZYDIS_MACHINE_MODE_LONG_64, ZYDIS_STACK_WIDTH_64)));
+
+  // Initialize the Zydis formatter.
+  assert(ZYAN_SUCCESS(ZydisFormatterInit(&formatter_,
+    ZYDIS_FORMATTER_STYLE_INTEL)));
+
+  // This makes it so that relative instructions are shown as RIP+X instead
+  // of using an absolute address.
+  ZydisFormatterSetProperty(&formatter_,
+    ZYDIS_FORMATTER_PROP_FORCE_RELATIVE_BRANCHES, true);
+  ZydisFormatterSetProperty(&formatter_,
+    ZYDIS_FORMATTER_PROP_FORCE_RELATIVE_RIPREL, true);
 }
 
 // Initialize the current binary with a 64-bit PE image.
@@ -25,7 +36,7 @@ bool binary::load(char const* const path) {
     return false;
 
   // Create the invalid symbol at index 0.
-  auto const null_symbol = create_symbol(symbol_type::invalid, "null");
+  auto const null_symbol = create_symbol(symbol_type::invalid, "<null>");
   assert(null_symbol->id == null_symbol_id);
 
   // Create the section data blocks before disassembling.
@@ -52,7 +63,7 @@ void binary::print() const {
   for (std::size_t i = 0; i < data_blocks_.size(); ++i) {
     auto const db = data_blocks_[i];
 
-    std::printf("[+]   #%-4zd Size: 0x%-8zX Alignment: 0x%-5X Read-only: %s\n",
+    std::printf("[+]   #%-4zu Size: 0x%-8zX Alignment: 0x%-5X Read-only: %s\n",
       i, db->bytes.size(), db->alignment, db->read_only ? "true" : "false");
   }
 
@@ -60,7 +71,14 @@ void binary::print() const {
   for (std::size_t i = 0; i < basic_blocks_.size(); ++i) {
     auto const bb = basic_blocks_[i];
 
-    std::printf("[+]   #%-4zd Symbol ID: %-6u\n", i, bb->sym_id);
+    std::printf("[+]   #%-4zd Symbol: %-6u Instruction count: %-4zu",
+      i, bb->sym_id, bb->instructions.size());
+
+    // Print the fallthrough target symbol ID, if it exists.
+    if (bb->fallthrough_target)
+      std::printf(" Fallthrough symbol: %-6u\n", bb->fallthrough_target->sym_id);
+    else
+      std::printf("\n");
   }
 }
 
@@ -178,27 +196,126 @@ bool binary::disassemble(disassembler_context& ctx) {
     return sym;
   };
 
+  // Convert an RVA to a file offset by iterating over every PE section.
+  auto const rva_to_file_offset = [&](std::uint32_t const rva) -> std::uint32_t {
+    for (std::size_t i = 0; i < ctx.nt_header->FileHeader.NumberOfSections; ++i) {
+      auto const& sec = ctx.sections[i];
+      if (rva >= sec.VirtualAddress && rva < (sec.VirtualAddress + sec.Misc.VirtualSize))
+        return sec.PointerToRawData + (rva - sec.VirtualAddress);
+    }
+
+    return 0;
+  };
+
   // Add the entrypoint to the disassembly queue.
   if (ctx.nt_header->OptionalHeader.AddressOfEntryPoint) {
     enqueue_code_rva(
-      ctx.nt_header->OptionalHeader.AddressOfEntryPoint, "entry-point");
+      ctx.nt_header->OptionalHeader.AddressOfEntryPoint, "<entry-point>");
   }
 
   // TODO: Add exports to the disassembly queue.
 
   while (!disassembly_queue.empty()) {
     // Pop an RVA from the front of the queue.
-    auto curr_rva = disassembly_queue.front();
+    auto const rva_start = disassembly_queue.front();
     disassembly_queue.pop();
 
-    auto const curr_bb = ctx.rva_to_sym[curr_rva]->bb;
+    auto const file_start = rva_to_file_offset(rva_start);
 
-    std::printf("[+] Starting a basic block at +0x%X.\n", curr_rva);
+    // This is the basic block that we're constructing.
+    auto const curr_bb = ctx.rva_to_sym[rva_start]->bb;
+
+    //std::printf("[+] Started basic block at RVA 0x%X.\n", rva_start);
 
     // Keep decoding until we hit a terminating instruction.
-    while (true) {
-      break;
+    for (std::uint32_t instr_offset = 0;
+         file_start + instr_offset < ctx.file_buffer.size();) {
+      // A pointer to the current instruction in the raw binary.
+      auto const curr_instr_buffer = &ctx.file_buffer[file_start + instr_offset];
+
+      // The amount of bytes until the file end.
+      // TODO: We should be using the section end instead.
+      auto const remaining_buffer_length =
+        ctx.file_buffer.size() - (file_start + instr_offset);
+
+      // Decode the current instruction.
+      ZydisDecodedInstruction decoded_instr;
+      if (ZYAN_FAILED(ZydisDecoderDecodeInstruction(&decoder_, nullptr,
+          curr_instr_buffer, remaining_buffer_length, &decoded_instr))) {
+        std::printf("[!] Failed to decode instruction.\n");
+        std::printf("[!]   RVA: 0x%X.\n", rva_start + instr_offset);
+        return false;
+      }
+
+      // This is the instruction that we'll be adding to the basic block. It
+      // it usually the same as the original instruction, unless it has any
+      // relative operands.
+      instruction instr;
+
+      if (decoded_instr.attributes & ZYDIS_ATTRIB_IS_RELATIVE) {
+        // A small optimization, since branch instructions can mostly be
+        // handled without needing to decode operands.
+        if (decoded_instr.raw.imm[0].is_relative) {
+          auto const target_rva = static_cast<std::uint32_t>(rva_start +
+            instr_offset + decoded_instr.length + decoded_instr.raw.imm[0].value.s);
+
+          // Get the symbol for the branch destination.
+          auto target_sym = ctx.rva_to_sym[target_rva];
+
+          // This is undiscovered code, add it to the disassembly queue.
+          if (!target_sym)
+            target_sym = enqueue_code_rva(target_rva, "<branch-target>");
+
+          assert(target_sym->type == symbol_type::code);
+        }
+
+        // Copy the original instruction.
+        instr.length = decoded_instr.length;
+        std::memcpy(instr.bytes, curr_instr_buffer, instr.length);
+      } else {
+        // Copy the original instruction.
+        instr.length = decoded_instr.length;
+        std::memcpy(instr.bytes, curr_instr_buffer, instr.length);
+      }
+
+      // Add the instruction to the basic block.
+      curr_bb->instructions.push_back(instr);
+
+      // If this is a terminating instruction, end the block.
+      if (decoded_instr.meta.category == ZYDIS_CATEGORY_RET ||
+          decoded_instr.meta.category == ZYDIS_CATEGORY_COND_BR ||
+          decoded_instr.meta.category == ZYDIS_CATEGORY_UNCOND_BR) {
+        // Conditional branches require a fallthrough target.
+        if (decoded_instr.meta.category == ZYDIS_CATEGORY_COND_BR) {
+          auto const fallthrough_rva = static_cast<std::uint32_t>(rva_start +
+            instr_offset + decoded_instr.length);
+
+          // If the fallthrough target doesn't have a symbol yet, add it to
+          // the disassembly queue.
+          if (auto const sym = ctx.rva_to_sym[fallthrough_rva])
+            curr_bb->fallthrough_target = sym->bb;
+          else
+            curr_bb->fallthrough_target = enqueue_code_rva(fallthrough_rva, "<fallthrough-target>")->bb;
+        }
+
+        break;
+      }
+
+      instr_offset += instr.length;
+
+      // If we've entered into another basic block, end the current block.
+      if (auto const sym = ctx.rva_to_sym[rva_start + instr_offset]) {
+        // TODO: It *might* be possible to accidently fall into a jump table
+        //       (which would be marked as data, not code).
+        assert(sym->type == symbol_type::code);
+        curr_bb->fallthrough_target = sym->bb;
+
+        break;
+      }
     }
+
+    // TODO: Handle empty basic blocks.
+    assert(!curr_bb->instructions.empty());
   }
 
   return true;

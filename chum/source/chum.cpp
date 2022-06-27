@@ -346,6 +346,23 @@ bool binary::disassemble(disassembler_context& ctx) {
             target_sym = enqueue_code_rva(target_rva);
 
           assert(target_sym->type == symbol_type::code);
+
+          // If we can fit the symbol ID in the original instruction, do that
+          // instead of re-encoding.
+          if (target_sym->id < (1ull << decoded_instr.raw.imm[0].size)) {
+            // Copy the original instruction.
+            instr.length = decoded_instr.length;
+            std::memcpy(instr.bytes, curr_instr_buffer, instr.length);
+
+            // Modify the displacement bytes to point to a symbol ID instead.
+            assert(decoded_instr.raw.imm[0].size <= 32);
+            std::memcpy(instr.bytes + decoded_instr.raw.imm[0].offset,
+              &target_sym->id, decoded_instr.raw.imm[0].size / 8);
+          }
+          // Re-encode the new instruction.
+          else {
+            assert(false);
+          }
         }
         // RIP relative memory references.
         else if (decoded_instr.raw.disp.offset != 0 &&
@@ -360,7 +377,7 @@ bool binary::disassemble(disassembler_context& ctx) {
           // Get the symbol for this memory reference.
           auto target_sym = ctx.rva_to_sym[target_rva];
 
-          // This is the first reference to this address, create a new symbol
+          // This is the first reference to this address. Create a new symbol
           // for it.
           if (!target_sym) {
             auto map_entry = rva_to_db_map_entry(ctx, target_rva);
@@ -382,10 +399,14 @@ bool binary::disassemble(disassembler_context& ctx) {
           // TODO: This isn't correct, but it's just for testing.
           assert(target_sym->type == symbol_type::data);
 
-          std::printf("[+]   0x%X:", rva_start + instr_offset);
-          for (std::size_t i = 0; i < decoded_instr.length; ++i)
-            std::printf(" %.2X", curr_instr_buffer[i]);
-          std::printf("\n");
+          // Copy the original instruction.
+          instr.length = decoded_instr.length;
+          std::memcpy(instr.bytes, curr_instr_buffer, instr.length);
+
+          // Modify the displacement bytes to point to a symbol ID instead.
+          static_assert(sizeof(target_sym->id) == 4);
+          std::memcpy(instr.bytes +
+            decoded_instr.raw.disp.offset, &target_sym->id, 4);
         }
         else {
           std::printf("[!] Unhandled relative instruction.\n");

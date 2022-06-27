@@ -3,7 +3,6 @@
 
 #include <fstream>
 #include <cassert>
-#include <Windows.h>
 
 namespace chum {
 
@@ -20,61 +19,18 @@ bool binary::load(char const* const path) {
   // load was called.
   *this = binary();
 
-  auto file_buffer = read_file_to_buffer(path);
-  if (file_buffer.empty())
+  disassembler_context ctx;
+  if (!init_disassembler_context(ctx, path))
     return false;
-
-  auto const dos_header = reinterpret_cast<PIMAGE_DOS_HEADER>(&file_buffer[0]);
-  if (dos_header->e_magic != IMAGE_DOS_SIGNATURE)
-    return false;
-
-  auto const nt_header = reinterpret_cast<PIMAGE_NT_HEADERS>(
-    &file_buffer[dos_header->e_lfanew]);
-  if (nt_header->Signature != IMAGE_NT_SIGNATURE)
-    return false;
-
-  // Make sure we're dealing with a 64-bit PE image.
-  if (nt_header->FileHeader.Machine != IMAGE_FILE_MACHINE_AMD64)
-    return false;
-
-  auto const sections = reinterpret_cast<PIMAGE_SECTION_HEADER>(nt_header + 1);
 
   // Create the invalid symbol at index 0.
   auto const null_symbol = create_symbol(symbol_type::invalid, "null symbol");
   assert(null_symbol->id == null_symbol_id);
 
-  // Create a data block for each data section.
-  for (std::size_t i = 0; i < nt_header->FileHeader.NumberOfSections; ++i) {
-    auto const& section = sections[i];
+  // Create the section data blocks before disassembling.
+  create_section_data_blocks(ctx);
 
-    // Ignore executable sections.
-    if (section.Characteristics & IMAGE_SCN_MEM_EXECUTE)
-      continue;
-
-    assert(section.Characteristics & IMAGE_SCN_MEM_READ);
-
-    auto const db = create_data_block(min(section.SizeOfRawData,
-      section.Misc.VirtualSize), nt_header->OptionalHeader.SectionAlignment);
-
-    // Copy the data from file.
-    std::memcpy(db->bytes.data(), &file_buffer[section.PointerToRawData],
-      db->bytes.size());
-
-    // Can we write to this section?
-    db->read_only = !(section.Characteristics & IMAGE_SCN_MEM_WRITE);
-
-    // This is a work-around since the section name wont be null-terminated
-    // if it is exactly 8 bytes long.
-    char section_name[9] = { 0 };
-    std::memcpy(section_name, section.Name, 8);
-
-    // Create a symbol for the start of this data section.
-    auto const sym = create_symbol(symbol_type::data, section_name);
-    sym->db     = db;
-    sym->offset = 0;
-  }
-
-  return true;
+  return disassemble(ctx);
 }
 
 // Print the contents of this binary, for debugging purposes.
@@ -132,6 +88,69 @@ symbol* binary::create_symbol(
   sym->type      = type;
   sym->name      = name ? name : "";
   return sym;
+}
+
+// Initialize the disassembler context.
+bool binary::init_disassembler_context(
+    disassembler_context& ctx, char const* const path) {
+  ctx.file_buffer = read_file_to_buffer(path);
+  if (ctx.file_buffer.empty())
+    return false;
+
+  ctx.dos_header = reinterpret_cast<PIMAGE_DOS_HEADER>(&ctx.file_buffer[0]);
+  if (ctx.dos_header->e_magic != IMAGE_DOS_SIGNATURE)
+    return false;
+
+  ctx.nt_header = reinterpret_cast<PIMAGE_NT_HEADERS>(
+    &ctx.file_buffer[ctx.dos_header->e_lfanew]);
+  if (ctx.nt_header->Signature != IMAGE_NT_SIGNATURE)
+    return false;
+
+  // Make sure we're dealing with a 64-bit PE image.
+  if (ctx.nt_header->FileHeader.Machine != IMAGE_FILE_MACHINE_AMD64)
+    return false;
+
+  ctx.sections = reinterpret_cast<PIMAGE_SECTION_HEADER>(ctx.nt_header + 1);
+
+  return true;
+}
+
+// Create data blocks for every PE section.
+void binary::create_section_data_blocks(disassembler_context& ctx) {
+  for (std::size_t i = 0; i < ctx.nt_header->FileHeader.NumberOfSections; ++i) {
+    auto const& section = ctx.sections[i];
+
+    // Ignore executable sections.
+    if (section.Characteristics & IMAGE_SCN_MEM_EXECUTE)
+      continue;
+
+    assert(section.Characteristics & IMAGE_SCN_MEM_READ);
+
+    auto const db = create_data_block(min(section.SizeOfRawData,
+      section.Misc.VirtualSize), ctx.nt_header->OptionalHeader.SectionAlignment);
+
+    // Copy the data from file.
+    std::memcpy(db->bytes.data(), &ctx.file_buffer[section.PointerToRawData],
+      db->bytes.size());
+
+    // Can we write to this section?
+    db->read_only = !(section.Characteristics & IMAGE_SCN_MEM_WRITE);
+
+    // This is a work-around since the section name wont be null-terminated
+    // if it is exactly 8 bytes long.
+    char section_name[9] = { 0 };
+    std::memcpy(section_name, section.Name, 8);
+
+    // Create a symbol for the start of this data section.
+    auto const sym = create_symbol(symbol_type::data, section_name);
+    sym->db     = db;
+    sym->offset = 0;
+  }
+}
+
+// Generate the basic blocks for this binary.
+bool binary::disassemble(disassembler_context& ctx) {
+  return true;
 }
 
 } // namespace chum

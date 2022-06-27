@@ -4,6 +4,7 @@
 #include "symbol.h"
 
 #include <vector>
+#include <Windows.h>
 
 #include <Zydis/Zydis.h>
 
@@ -30,6 +31,26 @@ public:
 
   // Create a new symbol.
   symbol* create_symbol(symbol_type type, char const* name = nullptr);
+
+private:
+  struct disassembler_context {
+    // Raw file contents.
+    std::vector<std::uint8_t> file_buffer;
+
+    // Pointers to various PE structures in the file.
+    PIMAGE_DOS_HEADER     dos_header;
+    PIMAGE_NT_HEADERS     nt_header;
+    PIMAGE_SECTION_HEADER sections;
+  };
+
+  // Initialize the disassembler context.
+  static bool init_disassembler_context(disassembler_context& ctx, char const* path);
+
+  // Create data blocks for every PE section.
+  void create_section_data_blocks(disassembler_context& ctx);
+
+  // Generate the basic blocks for this binary.
+  bool disassemble(disassembler_context& ctx);
 
 private:
   ZydisDecoder decoder_;

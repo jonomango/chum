@@ -1,5 +1,7 @@
 #pragma once
 
+#include "instruction.h"
+
 #include <cstdint>
 #include <vector>
 
@@ -16,6 +18,11 @@ namespace chum {
 // the middle of a basic block as long as the target function will return.
 class basic_block {
 public:
+
+private:
+  // The instructions that make up this block. The last instruction is a
+  // terminating instruction.
+  std::vector<instruction> instructions_;
 };
 
 // A data block is a contiguous blob of data.

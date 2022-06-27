@@ -3,6 +3,7 @@
 
 #include <fstream>
 #include <cassert>
+#include <queue>
 
 namespace chum {
 
@@ -24,7 +25,7 @@ bool binary::load(char const* const path) {
     return false;
 
   // Create the invalid symbol at index 0.
-  auto const null_symbol = create_symbol(symbol_type::invalid, "null symbol");
+  auto const null_symbol = create_symbol(symbol_type::invalid, "null");
   assert(null_symbol->id == null_symbol_id);
 
   // Create the section data blocks before disassembling.
@@ -57,9 +58,9 @@ void binary::print() const {
 
   std::printf("[+]\n[+] Basic blocks:\n");
   for (std::size_t i = 0; i < basic_blocks_.size(); ++i) {
-    auto const bb = data_blocks_[i];
+    auto const bb = basic_blocks_[i];
 
-    std::printf("[+]   #%zd\n", i);
+    std::printf("[+]   #%-4zd Symbol ID: %-6u\n", i, bb->sym_id);
   }
 }
 
@@ -112,6 +113,10 @@ bool binary::init_disassembler_context(
 
   ctx.sections = reinterpret_cast<PIMAGE_SECTION_HEADER>(ctx.nt_header + 1);
 
+  // Allocate the table so that any RVA can fit.
+  ctx.rva_to_sym = std::vector<symbol*>(
+    ctx.nt_header->OptionalHeader.SizeOfImage, nullptr);
+
   return true;
 }
 
@@ -130,8 +135,8 @@ void binary::create_section_data_blocks(disassembler_context& ctx) {
       section.Misc.VirtualSize), ctx.nt_header->OptionalHeader.SectionAlignment);
 
     // Copy the data from file.
-    std::memcpy(db->bytes.data(), &ctx.file_buffer[section.PointerToRawData],
-      db->bytes.size());
+    std::memcpy(db->bytes.data(),
+      &ctx.file_buffer[section.PointerToRawData], db->bytes.size());
 
     // Can we write to this section?
     db->read_only = !(section.Characteristics & IMAGE_SCN_MEM_WRITE);
@@ -143,13 +148,59 @@ void binary::create_section_data_blocks(disassembler_context& ctx) {
 
     // Create a symbol for the start of this data section.
     auto const sym = create_symbol(symbol_type::data, section_name);
-    sym->db     = db;
-    sym->offset = 0;
+    ctx.rva_to_sym[section.VirtualAddress] = sym;
+    sym->db                                = db;
+    sym->offset                            = 0;
   }
 }
 
 // Generate the basic blocks for this binary.
 bool binary::disassemble(disassembler_context& ctx) {
+  // A queue of RVAs to disassemble from.
+  std::queue<std::uint32_t> disassembly_queue = {};
+
+  // Add the specified RVA to the disassembly queue.
+  auto const enqueue_code_rva = [&](
+      std::uint32_t const rva, char const* const name = nullptr) {
+    disassembly_queue.push(rva);
+
+    // Make sure we're not creating a duplicate symbol.
+    assert(ctx.rva_to_sym[rva] == nullptr);
+
+    // Create a new symbol that will point to the start of this basic block.
+    auto const sym = ctx.rva_to_sym[rva] =
+      create_symbol(symbol_type::code, name);
+
+    // Create a new basic block.
+    sym->bb = create_basic_block();
+    sym->bb->sym_id = sym->id;
+
+    return sym;
+  };
+
+  // Add the entrypoint to the disassembly queue.
+  if (ctx.nt_header->OptionalHeader.AddressOfEntryPoint) {
+    enqueue_code_rva(
+      ctx.nt_header->OptionalHeader.AddressOfEntryPoint, "entry-point");
+  }
+
+  // TODO: Add exports to the disassembly queue.
+
+  while (!disassembly_queue.empty()) {
+    // Pop an RVA from the front of the queue.
+    auto curr_rva = disassembly_queue.front();
+    disassembly_queue.pop();
+
+    auto const curr_bb = ctx.rva_to_sym[curr_rva]->bb;
+
+    std::printf("[+] Starting a basic block at +0x%X.\n", curr_rva);
+
+    // Keep decoding until we hit a terminating instruction.
+    while (true) {
+      break;
+    }
+  }
+
   return true;
 }
 

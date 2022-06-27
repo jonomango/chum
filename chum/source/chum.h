@@ -41,6 +41,9 @@ private:
     PIMAGE_DOS_HEADER     dos_header;
     PIMAGE_NT_HEADERS     nt_header;
     PIMAGE_SECTION_HEADER sections;
+
+    // This maps every RVA to its associated symbol (if it has one).
+    std::vector<symbol*> rva_to_sym;
   };
 
   // Initialize the disassembler context.

@@ -38,7 +38,7 @@ struct symbol {
 
   union {
     // Valid only for code symbols.
-    class basic_block* bb;
+    struct basic_block* bb;
 
     // Valid only for data symbols.
     struct {

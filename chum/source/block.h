@@ -1,6 +1,7 @@
 #pragma once
 
 #include "instruction.h"
+#include "symbol.h"
 
 #include <cstdint>
 #include <vector>
@@ -16,10 +17,10 @@ namespace chum {
 // instructions are (usually) not considered to be terminating instructions,
 // as unintuitive as this may seem. This means that there may be CALLs in
 // the middle of a basic block as long as the target function will return.
-class basic_block {
-public:
+struct basic_block {
+  // The symbol that points to the beginning of this basic block.
+  symbol_id sym_id;
 
-private:
   // The instructions that make up this block. The last instruction is a
   // terminating instruction.
   std::vector<instruction> instructions_;

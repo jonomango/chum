@@ -16,6 +16,9 @@ public:
   // Create an empty binary.
   binary();
 
+  // Free any resources.
+  ~binary();
+
   // Print the contents of this binary, for debugging purposes.
   void print();
 
@@ -23,7 +26,8 @@ public:
   symbol* create_symbol(symbol_type type, char const* name = nullptr);
 
   // Create a zero-initialized data block of the specified size and alignment.
-  data_block* create_data_block(std::uint32_t size, std::uint32_t alignment = 1);
+  data_block* create_data_block(
+    std::uint32_t size, std::uint32_t alignment = 1);
 
   // Create and initialize a new data block from a raw blob of data.
   data_block* create_data_block(void const* data,

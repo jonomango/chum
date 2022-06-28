@@ -69,6 +69,15 @@ binary::binary() {
   orig_zydis_format_operand_imm = hook_zydis_format_operand_imm;
   ZydisFormatterSetHook(&formatter_, ZYDIS_FORMATTER_FUNC_FORMAT_OPERAND_IMM,
     reinterpret_cast<void const**>(&orig_zydis_format_operand_imm));
+
+  // Create the null symbol.
+  auto const null_symbol = create_symbol(symbol_type::invalid, "<null>");
+  assert(null_symbol->id == null_symbol_id);
+}
+
+// Free any resources.
+binary::~binary() {
+  // TODO: Implement this.
 }
 
 // Print the contents of this binary, for debugging purposes.
@@ -126,6 +135,49 @@ void binary::print() {
       instr_offset += instr.length;
     }
   }
+}
+
+// Create a new symbol that is assigned a unique symbol ID.
+symbol* binary::create_symbol(symbol_type const type, char const* const name) {
+  auto const sym = symbols_.emplace_back(new symbol{});
+  sym->id        = static_cast<symbol_id>(symbols_.size() - 1);
+  sym->type      = type;
+  sym->name      = name ? name : "";
+  return sym;
+}
+
+// Create a zero-initialized data block of the specified size and alignment.
+data_block* binary::create_data_block(
+    std::uint32_t const size, std::uint32_t const alignment) {
+  auto const db = data_blocks_.emplace_back(new data_block{});
+  db->bytes     = std::vector<std::uint8_t>(size, 0);
+  db->alignment = alignment;
+  db->read_only = false;
+  return db;
+}
+
+// Create and initialize a new data block from a raw blob of data.
+data_block* binary::create_data_block(void const* const data,
+    std::uint32_t const size, std::uint32_t const alignment) {
+  // "Iterators" to pass to std::vector constructor.
+  auto const data_begin = static_cast<std::uint8_t const*>(data);
+  auto const data_end   = data_begin + size;
+
+  auto const db = data_blocks_.emplace_back(new data_block{});
+  db->bytes     = std::vector<std::uint8_t>(data_begin, data_end);
+  db->alignment = alignment;
+  db->read_only = false;
+  return db;
+}
+
+// Create a new basic block for the specific code symbol. This block
+// contains zero instructions upon creation.
+basic_block* binary::create_basic_block(symbol_id const sym_id) {
+  auto const bb = basic_blocks_.emplace_back(new basic_block{});
+  bb->sym_id             = sym_id;
+  bb->fallthrough_target = nullptr;
+  bb->instructions       = {};
+  return bb;
 }
 
 } // namespace chum

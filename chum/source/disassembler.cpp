@@ -57,6 +57,34 @@ public:
     return true;
   }
 
+  // Create a data block for every PE data section.
+  void create_section_data_blocks() {
+    for (std::size_t i = 0; i < nt_header_->FileHeader.NumberOfSections; ++i) {
+      auto const& section = sections_[i];
+
+      // Ignore executable sections.
+      if (section.Characteristics & IMAGE_SCN_MEM_EXECUTE)
+        continue;
+
+      assert(section.Characteristics & IMAGE_SCN_MEM_READ);
+
+      // Create the data block.
+      auto const db = bin.binary_.create_data_block(section.Misc.VirtualSize,
+        nt_header_->OptionalHeader.SectionAlignment);
+
+      // Zero-initialize the data block.
+      std::memset(db->bytes.data(), 0, section.Misc.VirtualSize);
+
+      // Copy the data from file.
+      std::memcpy(db->bytes.data(),
+        &file_buffer_[section.PointerToRawData],
+        min(section.Misc.VirtualSize, section.SizeOfRawData));
+
+      // Can we write to this section?
+      db->read_only = !(section.Characteristics & IMAGE_SCN_MEM_WRITE);
+    }
+  }
+
 private:
   // The raw file contents.
   std::vector<std::uint8_t> file_buffer_ = {};
@@ -74,6 +102,9 @@ std::optional<disassembled_binary> disassemble(char const* const path) {
   // Initialize the disassembler.
   if (!dasm.initialize(path))
     return {};
+
+  // Create a data block for every data section.
+  dasm.create_section_data_blocks();
 
   return dasm.bin;
 }

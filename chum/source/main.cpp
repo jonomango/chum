@@ -10,6 +10,10 @@ int main() {
     return 0;
   }
 
+  auto const sym = bin->underlying_binary().create_symbol(
+    chum::symbol_type::code, "test bb symbol");
+  auto const bb = bin->underlying_binary().create_basic_block(sym->id);
+
   bin->print();
 }
 

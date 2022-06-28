@@ -1,12 +1,15 @@
 add_executable(chum
   "source/main.cpp"
   "source/chum.h"
-  "source/chum.cpp"
+  "source/binary.h"
+  "source/binary.cpp"
   "source/block.h"
   "source/block.cpp"
   "source/instruction.h"
   "source/instruction.cpp"
   "source/symbol.h"
+  "source/disassembler.h"
+  "source/disassembler.cpp"
   "source/util.h"
   "source/util.cpp"
 )

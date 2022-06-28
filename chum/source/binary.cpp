@@ -77,7 +77,34 @@ binary::binary() {
 
 // Free any resources.
 binary::~binary() {
-  // TODO: Implement this.
+  for (auto const e : symbols_)
+    delete e;
+  for (auto const e : data_blocks_)
+    delete e;
+  for (auto const e : basic_blocks_)
+    delete e;
+}
+
+// Move constructor.
+binary::binary(binary&& other) {
+  // I *think* this is correct...
+  std::swap(decoder_,      other.decoder_);
+  std::swap(formatter_,    other.formatter_);
+  std::swap(symbols_,      other.symbols_);
+  std::swap(data_blocks_,  other.data_blocks_);
+  std::swap(basic_blocks_, other.basic_blocks_);
+}
+
+// Move assignment operator.
+binary& binary::operator=(binary&& other) {
+  // I *think* this is correct...
+  std::swap(decoder_,      other.decoder_);
+  std::swap(formatter_,    other.formatter_);
+  std::swap(symbols_,      other.symbols_);
+  std::swap(data_blocks_,  other.data_blocks_);
+  std::swap(basic_blocks_, other.basic_blocks_);
+
+  return *this;
 }
 
 // Print the contents of this binary, for debugging purposes.

@@ -19,6 +19,16 @@ public:
   // Free any resources.
   ~binary();
 
+  // Move constructor.
+  binary(binary&& other);
+
+  // Move assignment operator.
+  binary& operator=(binary&& other);
+
+  // Prevent copying.
+  binary(binary const&) = delete;
+  binary& operator=(binary const&) = delete;
+
   // Print the contents of this binary, for debugging purposes.
   void print();
 

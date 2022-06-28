@@ -168,7 +168,7 @@ std::optional<disassembled_binary> disassemble(char const* const path) {
   // Create symbols for every PE import.
   dasm.create_import_symbols();
 
-  return dasm.bin;
+  return std::move(dasm.bin);
 }
 
 } // namespace chum

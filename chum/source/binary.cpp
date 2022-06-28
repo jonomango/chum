@@ -128,32 +128,5 @@ void binary::print() {
   }
 }
 
-// Create a new basic block that contains no instructions.
-basic_block* binary::create_basic_block() {
-  auto const bb = basic_blocks_.emplace_back(new basic_block);
-
-  return bb;
-}
-
-// Create a new data block with uninitialized data.
-data_block* binary::create_data_block(
-    std::uint32_t const size, std::uint32_t const alignment) {
-  auto const db = data_blocks_.emplace_back(new data_block);
-  db->bytes     = std::vector<std::uint8_t>(size, 0);
-  db->alignment = alignment;
-  db->read_only = false;
-  return db;
-}
-
-// Create a new symbol.
-symbol* binary::create_symbol(
-    symbol_type const type, char const* const name) {
-  auto const sym = symbols_.emplace_back(new symbol);
-  sym->id        = static_cast<symbol_id>(symbols_.size() - 1);
-  sym->type      = type;
-  sym->name      = name ? name : "";
-  return sym;
-}
-
 } // namespace chum
 

@@ -138,7 +138,7 @@ void binary::print() {
 
     // Print the fallthrough target symbol ID, if it exists.
     if (bb->fallthrough_target)
-      std::printf(" Fallthrough symbol: %-6u\n", bb->fallthrough_target->sym_id);
+      std::printf(" Fallthrough symbol: %-6u\n", bb->fallthrough_target);
     else
       std::printf("\n");
 
@@ -198,13 +198,32 @@ data_block* binary::create_data_block(void const* const data,
 }
 
 // Create a new basic block for the specific code symbol. This block
-// contains zero instructions upon creation.
+// contains zero instructions upon creation. This function also updates
+// the specified symbol so that it points to the newly created block.
 basic_block* binary::create_basic_block(symbol_id const sym_id) {
-  auto const bb = basic_blocks_.emplace_back(new basic_block{});
-  bb->sym_id             = sym_id;
-  bb->fallthrough_target = nullptr;
-  bb->instructions       = {};
-  return bb;
+  // Make sure we're dealing with a code symbol.
+  auto const sym = symbols_[sym_id];
+  assert(sym->type == symbol_type::code);
+
+  sym->bb = basic_blocks_.emplace_back(new basic_block{});
+  sym->bb->sym_id             = sym_id;
+  sym->bb->fallthrough_target = null_symbol_id;
+  sym->bb->instructions       = {};
+
+  return sym->bb;
+}
+
+// Create a new basic block, as well as a new code symbol that points
+// to this block. This block contains zero instructions upon creation.
+basic_block* binary::create_basic_block(char const* const name) {
+  auto const sym = create_symbol(symbol_type::code, name);
+
+  sym->bb = basic_blocks_.emplace_back(new basic_block{});
+  sym->bb->sym_id             = sym->id;
+  sym->bb->fallthrough_target = null_symbol_id;
+  sym->bb->instructions       = {};
+
+  return sym->bb;
 }
 
 } // namespace chum

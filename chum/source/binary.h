@@ -44,8 +44,13 @@ public:
     std::uint32_t size, std::uint32_t alignment = 1);
 
   // Create a new basic block for the specific code symbol. This block
-  // contains zero instructions upon creation.
+  // contains zero instructions upon creation. This function also updates
+  // the specified symbol so that it points to the newly created block.
   basic_block* create_basic_block(symbol_id sym_id);
+
+  // Create a new basic block, as well as a new code symbol that points
+  // to this block. This block contains zero instructions upon creation.
+  basic_block* create_basic_block(char const* name = nullptr);
 
 private:
   ZydisDecoder decoder_;

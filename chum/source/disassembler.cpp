@@ -7,6 +7,7 @@ namespace chum {
 
 // Get the symbol that an RVA points to.
 symbol* disassembled_binary::rva_to_symbol(std::uint32_t const rva) {
+  assert(false);
   return nullptr;
 }
 
@@ -42,7 +43,7 @@ public:
     sections_ = reinterpret_cast<PIMAGE_SECTION_HEADER>(nt_header_ + 1);
 
     // Allocate the RVA to symbol table so that any RVA can be used as an index.
-    rva_to_sym_ = std::vector<symbol*>(
+    bin.rva_to_sym_ = std::vector<symbol*>(
       nt_header_->OptionalHeader.SizeOfImage, nullptr);
 
     return true;
@@ -113,8 +114,8 @@ public:
         sprintf_s(symbol_name, "%s.%s", dll_name, import_by_name->Name);
 
         // Create a named symbol for this import, if one doesn't already exist.
-        if (!rva_to_sym_[first_thunk_rva]) {
-          auto const sym = rva_to_sym_[first_thunk_rva] =
+        if (!bin.rva_to_sym_[first_thunk_rva]) {
+          auto const sym = bin.rva_to_sym_[first_thunk_rva] =
             bin.create_symbol(symbol_type::data, symbol_name);
 
           // Get the data block that this symbol resides in.
@@ -149,9 +150,6 @@ private:
   PIMAGE_DOS_HEADER     dos_header_ = nullptr;
   PIMAGE_NT_HEADERS     nt_header_  = nullptr;
   PIMAGE_SECTION_HEADER sections_   = nullptr;
-
-  // This maps every RVA to its associated symbol (if it has one).
-  std::vector<symbol*> rva_to_sym_ = {};
 };
 
 // Disassemble an x86-64 PE file.

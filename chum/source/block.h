@@ -23,8 +23,8 @@ struct basic_block {
 
   // The fallthrough target is the basic block that is immediately after the
   // current block. This is NULL if the terminating instruction will never
-  // fall through (RET, JMP, etc).
-  basic_block* fallthrough_target = nullptr;
+  // fall through (RET, JMP, etc). This must be a code symbol.
+  symbol_id fallthrough_target = null_symbol_id;
 
   // The instructions that make up this block. The last instruction is a
   // terminating instruction.

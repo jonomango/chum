@@ -15,6 +15,12 @@ class disassembled_binary : public binary {
 public:
   // Get the symbol that an RVA points to.
   symbol* rva_to_symbol(std::uint32_t rva);
+
+private:
+  // This maps every RVA to its associated symbol (if it has one).
+  // TODO: This consumes a HUGE amount of memory. Is this worth it?
+  // TODO: Optimize to use symbol IDs (although at the cost of 1 indirection).
+  std::vector<symbol*> rva_to_sym_ = {};
 };
 
 // Try to disassemble an x86-64 PE file.

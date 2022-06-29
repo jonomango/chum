@@ -10,8 +10,9 @@ int main() {
     return 0;
   }
 
-  auto const sym = bin->create_symbol(chum::symbol_type::code, "test bb symbol");
-  auto const bb = bin->create_basic_block(sym->id);
+  auto const bb = bin->create_basic_block("block_1");
+  bb->instructions.push_back({ 1, { 0x90 } });
+  bb->instructions.push_back({ 6, { 0xFF, 0x15, 0x01, 0x00, 0x00, 0x00 } });
 
   bin->print();
 }

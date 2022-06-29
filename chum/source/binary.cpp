@@ -17,8 +17,9 @@ static ZyanStatus hook_zydis_format_operand_mem(
   if (context->operand->mem.base != ZYDIS_REGISTER_RIP)
     return orig_zydis_format_operand_mem(formatter, buffer, context);
 
+  auto const mask = (1ULL << context->operand->size) - 1;
   auto const& sym_table = *reinterpret_cast<std::vector<symbol*>*>(context->user_data);
-  auto const sym = sym_table[context->operand->mem.disp.value];
+  auto const sym = sym_table[context->operand->imm.value.u & mask];
 
   ZydisFormatterBufferAppend(buffer, ZYDIS_TOKEN_SYMBOL);
   ZyanString* string;
@@ -35,8 +36,9 @@ static ZyanStatus hook_zydis_format_operand_imm(
   if (!context->operand->imm.is_relative)
     return orig_zydis_format_operand_imm(formatter, buffer, context);
 
+  auto const mask = (1ULL << context->operand->size) - 1;
   auto const& sym_table = *reinterpret_cast<std::vector<symbol*>*>(context->user_data);
-  auto const sym = sym_table[context->operand->imm.value.u];
+  auto const sym = sym_table[context->operand->imm.value.u & mask];
 
   ZydisFormatterBufferAppend(buffer, ZYDIS_TOKEN_SYMBOL);
   ZyanString* string;
@@ -131,7 +133,7 @@ void binary::print() {
     std::printf("[+]   %s:\n", mod->name());
 
     for (auto const& routine : mod->routines())
-      std::printf("[+]   - %s\n", routine->name.c_str());
+      std::printf("[+]     - %s\n", routine->name.c_str());
   }
 
   std::printf("[+]\n[+] Data blocks:\n");
@@ -176,7 +178,7 @@ void binary::print() {
         decoded_operands, decoded_instr.operand_count_visible, buffer,
         128, 0, &symbols_);
 
-      std::printf("[+]     +%.3X                        %s\n", instr_offset, buffer);
+      std::printf("[+]     +%.3X                       %s\n", instr_offset, buffer);
 
       instr_offset += instr.length;
     }

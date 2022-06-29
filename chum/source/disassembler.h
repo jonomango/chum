@@ -16,6 +16,11 @@ public:
   // Get the symbol that an RVA points to.
   symbol* rva_to_symbol(std::uint32_t rva);
 
+  // Get the closest symbol that contains the specified RVA. For example,
+  // if the specified RVA lands inside of a basic block, then the basic
+  // block's symbol would be returned.
+  symbol* rva_to_containing_symbol(std::uint32_t rva);
+
 private:
   // This maps every RVA to its associated symbol (if it has one).
   // TODO: This consumes a HUGE amount of memory. Is this worth it?

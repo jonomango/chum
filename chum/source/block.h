@@ -34,7 +34,7 @@ struct basic_block {
 // A data block is a contiguous blob of data.
 struct data_block {
   // The raw data that makes up this block.
-  std::vector<std::uint8_t> bytes;
+  std::vector<std::uint8_t> bytes = {};
 
   // The alignment of the starting address for this data block. This value
   // must be a power of 2. A value of 1 indicates no alignment at all.

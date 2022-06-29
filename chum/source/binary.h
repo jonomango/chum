@@ -2,6 +2,7 @@
 
 #include "block.h"
 #include "symbol.h"
+#include "imports.h"
 
 #include <vector>
 
@@ -52,9 +53,16 @@ public:
   // to this block. This block contains zero instructions upon creation.
   basic_block* create_basic_block(char const* name = nullptr);
 
+  // Create an empty import module.
+  import_module* create_import_module(char const* name);
+
 private:
-  ZydisDecoder decoder_;
-  ZydisFormatter formatter_;
+  ZydisDecoder decoder_ = {};
+  ZydisFormatter formatter_ = {};
+
+  // Most of these containers need to store pointers to the contained
+  // structures since they require stability. We dont want to invalidate
+  // any existing pointers whenever an insertion/deletion occurs.
 
   // Every symbol that makes up this binary. These are accessed with symbol IDs.
   std::vector<symbol*> symbols_ = {};
@@ -64,6 +72,9 @@ private:
 
   // Every piece of code that makes up this binary.
   std::vector<basic_block*> basic_blocks_ = {};
+
+  // These are imports from external modules.
+  std::vector<import_module*> import_modules_ = {};
 };
 
 } // namespace chum

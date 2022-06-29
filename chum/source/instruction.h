@@ -13,7 +13,7 @@ struct instruction {
 
   // This is a variable-length array that contains the raw instruction bytes.
   // TODO: Actually make this variable-length...
-  std::uint8_t bytes[15];
+  std::uint8_t bytes[15] = {};
 };
 
 } // namespace chum

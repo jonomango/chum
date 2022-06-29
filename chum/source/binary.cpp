@@ -1,6 +1,7 @@
 #include "binary.h"
 
 #include <cassert>
+#include <algorithm>
 
 #include <zycore/Format.h>
 
@@ -83,26 +84,30 @@ binary::~binary() {
     delete e;
   for (auto const e : basic_blocks_)
     delete e;
+  for (auto const e : import_modules_)
+    delete e;
 }
 
 // Move constructor.
 binary::binary(binary&& other) {
   // I *think* this is correct...
-  std::swap(decoder_,      other.decoder_);
-  std::swap(formatter_,    other.formatter_);
-  std::swap(symbols_,      other.symbols_);
-  std::swap(data_blocks_,  other.data_blocks_);
-  std::swap(basic_blocks_, other.basic_blocks_);
+  std::swap(decoder_,        other.decoder_);
+  std::swap(formatter_,      other.formatter_);
+  std::swap(symbols_,        other.symbols_);
+  std::swap(data_blocks_,    other.data_blocks_);
+  std::swap(basic_blocks_,   other.basic_blocks_);
+  std::swap(import_modules_, other.import_modules_);
 }
 
 // Move assignment operator.
 binary& binary::operator=(binary&& other) {
   // I *think* this is correct...
-  std::swap(decoder_,      other.decoder_);
-  std::swap(formatter_,    other.formatter_);
-  std::swap(symbols_,      other.symbols_);
-  std::swap(data_blocks_,  other.data_blocks_);
-  std::swap(basic_blocks_, other.basic_blocks_);
+  std::swap(decoder_,        other.decoder_);
+  std::swap(formatter_,      other.formatter_);
+  std::swap(symbols_,        other.symbols_);
+  std::swap(data_blocks_,    other.data_blocks_);
+  std::swap(basic_blocks_,   other.basic_blocks_);
+  std::swap(import_modules_, other.import_modules_);
 
   return *this;
 }
@@ -119,6 +124,14 @@ void binary::print() {
       std::printf(" Name: %s\n", sym->name.c_str());
     else
       std::printf("\n");
+  }
+
+  std::printf("[+]\n[+] Imports:\n");
+  for (auto const& mod : import_modules_) {
+    std::printf("[+]   %s:\n", mod->name());
+
+    for (auto const& routine : mod->routines())
+      std::printf("[+]   - %s\n", routine->name.c_str());
   }
 
   std::printf("[+]\n[+] Data blocks:\n");
@@ -224,6 +237,12 @@ basic_block* binary::create_basic_block(char const* const name) {
   sym->bb->instructions       = {};
 
   return sym->bb;
+}
+
+// Create an empty import module.
+import_module* binary::create_import_module(char const* const name) {
+  // TODO: Make sure this isn't a duplicate.
+  return import_modules_.emplace_back(new import_module(*this, name));
 }
 
 } // namespace chum

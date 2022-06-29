@@ -4,19 +4,27 @@
 
 namespace chum {
 
-// The different types of symbols that exist. Might be useful to add even
-// more information, such as import_data, str_data, etc.
+// The different types of symbols that exist. Might be useful to add symbol
+// aliases as well, which would point to another symbol.
 enum class symbol_type {
   invalid,
+
+  // A code symbol points to the start of a basic block.
   code,
-  data
+
+  // A data symbol points to a location inside of a data block.
+  data,
+
+  // An import symbol points to a location inside of an import table.
+  import
 };
 
 // Get the string representation of a symbol type.
 inline constexpr char const* serialize_symbol_type(symbol_type const type) {
   switch (type) {
-  case symbol_type::code: return "code";
-  case symbol_type::data: return "data";
+  case symbol_type::code:   return "code";
+  case symbol_type::data:   return "data";
+  case symbol_type::import: return "import";
   default: return "invalid";
   }
 }
@@ -29,6 +37,7 @@ using symbol_id = std::uint32_t;
 inline constexpr symbol_id null_symbol_id = 0;
 
 // A symbol represents a memory address that is not known until link-time.
+// TODO: support exporting symbols.
 struct symbol {
   // The symbol ID pointing to this symbol.
   symbol_id id = null_symbol_id;
@@ -45,8 +54,11 @@ struct symbol {
       struct data_block* db;
 
       // This is the offset of the data from the start of the data block.
-      std::uint32_t offset;
+      std::uint32_t db_offset;
     };
+
+    // Valid only for import symbols.
+    struct import_routine* ir;
   };
 
   // An optional name for this symbol.

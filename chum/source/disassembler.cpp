@@ -11,6 +11,14 @@ symbol* disassembled_binary::rva_to_symbol(std::uint32_t const rva) {
   return nullptr;
 }
 
+// Get the closest symbol that contains the specified RVA. For example,
+// if the specified RVA lands inside of a basic block, then the basic
+// block's symbol would be returned.
+symbol* disassembled_binary::rva_to_containing_symbol(std::uint32_t const rva) {
+  assert(false);
+  return nullptr;
+}
+
 // This is an internal structure that is used to produce a disassembled
 // binary. I don't really like how this is structured, but I couldn't find
 // a better solution.
@@ -96,6 +104,9 @@ public:
       auto const dll_name = reinterpret_cast<char const*>(&file_buffer_[
         rva_to_file_offset(import_descriptor->Name)]);
 
+      // Create an import module for this DLL.
+      auto const imp_mod = bin.create_import_module(dll_name);
+
       // The original first thunk contains the name, while the first thunk
       // contains the runtime address of the import.
       auto first_thunk_rva = import_descriptor->FirstThunk;
@@ -109,24 +120,16 @@ public:
           &file_buffer_[rva_to_file_offset(static_cast<std::uint32_t>(
           orig_first_thunk->u1.AddressOfData))]);
 
-        // Create the symbol name.
-        char symbol_name[512] = { 0 };
-        sprintf_s(symbol_name, "%s.%s", dll_name, import_by_name->Name);
-
-        // Create a named symbol for this import, if one doesn't already exist.
-        if (!bin.rva_to_sym_[first_thunk_rva]) {
-          auto const sym = bin.rva_to_sym_[first_thunk_rva] =
-            bin.create_symbol(symbol_type::data, symbol_name);
-
-          // Get the data block that this symbol resides in.
-          //auto const map_entry = rva_to_db_map_entry(ctx, first_thunk_rva);
-          //assert(map_entry != nullptr);
-
-          //sym->db     = map_entry->db;
-          //sym->offset = first_thunk_rva - map_entry->rva;
-        }
+        // Create an import routine.
+        imp_mod->create_routine(import_by_name->Name);
       }
     }
+  }
+
+  // The main engine of the recursive disassembler. This tries to distinguish
+  // code from data and form the basic blocks that compose this binary.
+  bool disassemble() {
+    return true;
   }
 
 private:

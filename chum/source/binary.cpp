@@ -151,9 +151,15 @@ void binary::print() {
 
     // Print the fallthrough target symbol ID, if it exists.
     if (bb->fallthrough_target)
-      std::printf(" Fallthrough symbol: %-6u\n", bb->fallthrough_target);
+      std::printf(" Fallthrough: %-6u\n", bb->fallthrough_target);
     else
       std::printf("\n");
+
+    // Print the symbol name as a label.
+    if (auto const sym = get_symbol(bb->sym_id); sym && !sym->name.empty()) {
+      std::printf("[+]     +000\n");
+      std::printf("[+]     +000 %20.20s:\n", sym->name.c_str());
+    }
 
     // Print every instruction.
     std::uint32_t instr_offset = 0;
@@ -170,10 +176,11 @@ void binary::print() {
         decoded_operands, decoded_instr.operand_count_visible, buffer,
         128, 0, &symbols_);
 
-      std::printf("[+]     +%.3X: %s\n", instr_offset, buffer);
+      std::printf("[+]     +%.3X                        %s\n", instr_offset, buffer);
 
       instr_offset += instr.length;
     }
+    std::printf("[+]\n");
   }
 }
 
@@ -184,6 +191,13 @@ symbol* binary::create_symbol(symbol_type const type, char const* const name) {
   sym->type      = type;
   sym->name      = name ? name : "";
   return sym;
+}
+
+// Get a symbol from its ID.
+symbol* binary::get_symbol(symbol_id const sym_id) {
+  if (sym_id >= symbols_.size())
+    return nullptr;
+  return symbols_[sym_id];
 }
 
 // Create a zero-initialized data block of the specified size and alignment.

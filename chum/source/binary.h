@@ -36,6 +36,9 @@ public:
   // Create a new symbol that is assigned a unique symbol ID.
   symbol* create_symbol(symbol_type type, char const* name = nullptr);
 
+  // Get a symbol from its ID.
+  symbol* get_symbol(symbol_id sym_id);
+
   // Create a zero-initialized data block of the specified size and alignment.
   data_block* create_data_block(
     std::uint32_t size, std::uint32_t alignment = 1);

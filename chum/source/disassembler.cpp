@@ -145,30 +145,28 @@ public:
 
     // Add the specified RVA to the disassembly queue and return the
     // code symbol ID that points to the created basic block.
-    auto const enqueue_code_rva = [&](
-        std::uint32_t const rva, char const* name = nullptr) {
-      disassembly_queue.push(rva);
+    auto const enqueue_code_rva =
+      [&](std::uint32_t const rva, char const* name = nullptr) {
+        disassembly_queue.push(rva);
 
-      // Make sure we're not creating a duplicate symbol.
-      assert(rva_to_sym_[rva] == null_symbol_id);
+        // Make sure we're not creating a duplicate symbol.
+        assert(rva_to_sym_[rva] == null_symbol_id);
 
-      // Auto-generate a name for this symbol if none was provided.
-      char generated_sym_name[32] = { 0 };
-      if (!name) {
-        sprintf_s(generated_sym_name, "loc_%X", rva);
-        name = generated_sym_name;
-      }
+        // Auto-generate a name for this symbol if none was provided.
+        char generated_sym_name[32] = { 0 };
+        if (!name) {
+          sprintf_s(generated_sym_name, "loc_%X", rva);
+          name = generated_sym_name;
+        }
 
-      // Create a new basic block for this RVA.
-      auto const bb = bin.create_basic_block(name);
-
-      return rva_to_sym_[rva] = bb->sym_id;
-    };
+        return rva_to_sym_[rva] = bin.create_basic_block(name)->sym_id;
+      };
 
     // Add the entrypoint to the disassembly queue.
     if (nt_header_->OptionalHeader.AddressOfEntryPoint) {
       enqueue_code_rva(
         nt_header_->OptionalHeader.AddressOfEntryPoint, "entrypoint");
+      enqueue_code_rva(0x1030);
     }
 
     while (!disassembly_queue.empty()) {
@@ -177,6 +175,7 @@ public:
       disassembly_queue.pop();
 
       auto const file_start = rva_to_file_offset(rva_start);
+      assert(file_start != 0);
 
       // This is the basic block that we're constructing.
       auto const curr_bb = bin.get_symbol(rva_to_sym_[rva_start])->bb;
@@ -208,6 +207,10 @@ public:
         // relative operands.
         instruction instr;
 
+        // Copy the original instruction.
+        instr.length = decoded_instr.length;
+        std::memcpy(instr.bytes, curr_instr_buffer, instr.length);
+
         // Rewrite relative instructions to use symbols, as well as adding any
         // discovered code to be further disassembled.
         if (decoded_instr.attributes & ZYDIS_ATTRIB_IS_RELATIVE) {
@@ -226,15 +229,9 @@ public:
             if (target_sym_id == null_symbol_id)
               target_sym_id = enqueue_code_rva(target_rva);
 
-            assert(bin.get_symbol(target_sym_id)->type == symbol_type::code);
-
             // If we can fit the symbol ID in the original instruction, do that
             // instead of re-encoding.
             if (target_sym_id < (1ull << decoded_instr.raw.imm[0].size)) {
-              // Copy the original instruction.
-              instr.length = decoded_instr.length;
-              std::memcpy(instr.bytes, curr_instr_buffer, instr.length);
-
               // Modify the displacement bytes to point to a symbol ID instead.
               assert(decoded_instr.raw.imm[0].size <= 32);
               std::memcpy(instr.bytes + decoded_instr.raw.imm[0].offset,
@@ -274,10 +271,6 @@ public:
             assert(bin.get_symbol(target_sym_id)->type == symbol_type::data ||
                    bin.get_symbol(target_sym_id)->type == symbol_type::import);
 
-            // Copy the original instruction.
-            instr.length = decoded_instr.length;
-            std::memcpy(instr.bytes, curr_instr_buffer, instr.length);
-
             // Modify the displacement bytes to point to a symbol ID instead.
             static_assert(sizeof(target_sym_id) == 4);
             std::memcpy(instr.bytes +
@@ -287,11 +280,6 @@ public:
             std::printf("[!] Unhandled relative instruction.\n");
             return false;
           }
-        }
-        else {
-          // Copy the original instruction.
-          instr.length = decoded_instr.length;
-          std::memcpy(instr.bytes, curr_instr_buffer, instr.length);
         }
 
         // Add the instruction to the basic block.

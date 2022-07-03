@@ -17,7 +17,7 @@ static ZyanStatus hook_zydis_format_operand_mem(
   if (context->operand->mem.base != ZYDIS_REGISTER_RIP)
     return orig_zydis_format_operand_mem(formatter, buffer, context);
 
-  auto const mask = (1ULL << context->instruction->raw.disp.size) - 1;
+  auto const mask = (1ull << context->instruction->raw.disp.size) - 1;
   auto const& sym_table = *reinterpret_cast<std::vector<symbol*>*>(context->user_data);
   auto const sym_id = *reinterpret_cast<std::uint64_t const*>(&context->operand->mem.disp.value) & mask;
   auto const sym = sym_table[sym_id];
@@ -37,7 +37,7 @@ static ZyanStatus hook_zydis_format_operand_imm(
   if (!context->operand->imm.is_relative)
     return orig_zydis_format_operand_imm(formatter, buffer, context);
 
-  auto const mask = (1ULL << context->operand->size) - 1;
+  auto const mask = (1ull << context->operand->size) - 1;
   auto const& sym_table = *reinterpret_cast<std::vector<symbol*>*>(context->user_data);
   auto const sym = sym_table[context->operand->imm.value.u & mask];
 

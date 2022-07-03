@@ -9,12 +9,11 @@
 namespace chum {
 
 struct rva_map_entry {
-  // This is the symbol that this RVA lands in.
+  // If the blink is 0, this is the symbol that this RVA lands in.
   symbol_id sym_id = null_symbol_id;
 
-  // If the symbol points to code, then this is how many instructions from
-  // the start of the block that this RVA is. Otherwise, this is 0.
-  std::uint32_t offset = 0;
+  // If nonzero, this is the number of bytes to the previous RVA entry.
+  std::uint32_t blink = 0;
 };
 
 // Get the symbol that an RVA points to.
@@ -171,11 +170,52 @@ public:
         return rva_map_[rva] = { bin.create_basic_block(name)->sym_id, 0 };
       };
 
+    // Split the basic block at the specified RVA into two, and return the
+    // new RVA entry.
+    auto const split_block = [&](std::uint32_t const rva) {
+      std::size_t count        = 0;
+      basic_block* original_bb = nullptr;
+
+      // Calculate the number of instructions that should remain in
+      // the original basic block by following the linked list backwards.
+      for (auto curr_rva = rva; true; ++count) {
+        auto const& entry = rva_map_[curr_rva];
+
+        // Keep walking until we reach the root.
+        if (entry.blink != 0) {
+          curr_rva -= entry.blink;
+          continue;
+        }
+
+        original_bb = bin.get_symbol(rva_map_[curr_rva].sym_id)->bb;
+        break;
+      }
+
+      // Auto-generate a name for this symbol.
+      char generated_sym_name[32] = { 0 };
+      sprintf_s(generated_sym_name, "loc_%X", rva);
+
+      auto const new_bb = bin.create_basic_block(generated_sym_name);
+
+      // Steal the original block's fallthrough target.
+      new_bb->fallthrough_target = original_bb->fallthrough_target;
+      original_bb->fallthrough_target = new_bb->sym_id;
+
+      // Steal the tail end instructions from the original block.
+      new_bb->instructions.insert(begin(new_bb->instructions),
+        begin(original_bb->instructions) + count,
+        end(original_bb->instructions));
+      original_bb->instructions.erase(
+        begin(original_bb->instructions) + count,
+        end(original_bb->instructions));
+
+      return rva_map_[rva] = { new_bb->sym_id, 0 };
+    };
+
     // Add the entrypoint to the disassembly queue.
     if (nt_header_->OptionalHeader.AddressOfEntryPoint) {
       enqueue_code_rva(
         nt_header_->OptionalHeader.AddressOfEntryPoint, "entrypoint");
-      enqueue_code_rva(0x1030);
     }
 
     while (!disassembly_queue.empty()) {
@@ -184,7 +224,10 @@ public:
       disassembly_queue.pop();
 
       auto const file_start = rva_to_file_offset(rva_start);
-      assert(file_start != 0);
+
+      // TODO: Properly handle these cases.
+      if (file_start == 0)
+        continue;
 
       // This is the basic block that we're constructing.
       assert(bin.get_symbol(rva_map_[rva_start].sym_id)->type == symbol_type::code);
@@ -235,34 +278,16 @@ public:
             // Get the RVA entry for the branch destination.
             auto target_rva_entry = rva_map_[target_rva];
 
+            // We jumped into the middle of a basic block.
+            if (target_rva_entry.blink != 0) {
+              std::printf("[+]   Splitting basic block.\n");
+              target_rva_entry = split_block(target_rva);
+            }
             // This is undiscovered code, add it to the disassembly queue.
-            if (target_rva_entry.sym_id == null_symbol_id)
+            else if (target_rva_entry.sym_id == null_symbol_id)
               target_rva_entry = enqueue_code_rva(target_rva);
 
-            // We jumped into the middle of a basic block.
-            if (target_rva_entry.offset != 0) {
-              auto const target_sym = bin.get_symbol(target_rva_entry.sym_id);
-              assert(target_sym->type == symbol_type::code);
-              assert(target_sym->bb->instructions.size() > target_rva_entry.offset);
-
-              auto const new_bb = bin.create_basic_block("middle_of_bb");
-
-              // Steal the original basic block's fallthrough target.
-              new_bb->fallthrough_target = target_sym->bb->fallthrough_target;
-              target_sym->bb->fallthrough_target = new_bb->sym_id;
-
-              // Steal the original basic block's instructions.
-              new_bb->instructions.insert(begin(new_bb->instructions),
-                begin(target_sym->bb->instructions) + target_rva_entry.offset,
-                end(target_sym->bb->instructions));
-
-              // Erase the instructions that we stole from the original block.
-              target_sym->bb->instructions.erase(
-                begin(target_sym->bb->instructions) + target_rva_entry.offset,
-                end(target_sym->bb->instructions));
-
-              target_rva_entry = rva_map_[target_rva] = { new_bb->sym_id, 0 };
-            }
+            assert(target_rva_entry.blink == 0);
 
             // If we can fit the symbol ID in the original instruction, do that
             // instead of re-encoding.
@@ -274,7 +299,10 @@ public:
             }
             // Re-encode the new instruction.
             else {
-              assert(false);
+              std::uint32_t zero = 0;
+              std::memcpy(instr.bytes + decoded_instr.raw.imm[0].offset,
+                &zero, decoded_instr.raw.imm[0].size / 8);
+              //assert(false);
             }
           }
           // RIP relative memory references.
@@ -293,6 +321,8 @@ public:
             // This is the first reference to this address. Create a new symbol
             // for it.
             if (target_rva_entry.sym_id == null_symbol_id) {
+              assert(target_rva_entry.blink == 0);
+
               // Create a name for this symbol that contains the target RVA.
               char symbol_name[32] = { 0 };
               sprintf_s(symbol_name, "unk_%X", target_rva);
@@ -301,10 +331,6 @@ public:
               target_rva_entry = rva_map_[target_rva] = {
                 bin.create_symbol(symbol_type::data, symbol_name)->id, 0 };
             }
-
-            // TODO: This isn't correct, but it's just for testing.
-            assert(bin.get_symbol(target_rva_entry.sym_id)->type == symbol_type::data ||
-                   bin.get_symbol(target_rva_entry.sym_id)->type == symbol_type::import);
 
             // Modify the displacement bytes to point to a symbol ID instead.
             static_assert(sizeof(target_rva_entry.sym_id) == 4);
@@ -329,10 +355,13 @@ public:
             auto const fallthrough_rva = static_cast<std::uint32_t>(rva_start +
               instr_offset + decoded_instr.length);
 
-            if (auto const rva_entry = rva_map_[fallthrough_rva];
+            if (auto rva_entry = rva_map_[fallthrough_rva];
                 rva_entry.sym_id != null_symbol_id) {
-              if (rva_entry.offset != 0)
-                __debugbreak();
+              // It *might* be possible to fallthrough into the middle of
+              // an already existing basic block if the binary jumps into
+              // the middle of instructions.
+              if (rva_entry.blink != 0)
+                rva_entry = split_block(fallthrough_rva);
 
               // Point the fallthrough target to the next basic block.
               curr_bb->fallthrough_target = rva_entry.sym_id;
@@ -362,9 +391,8 @@ public:
         }
 
         // Create an RVA entry for the next instruction.
-        rva_map_[rva_start + instr_offset] = { curr_bb->sym_id,
-          static_cast<std::uint32_t>(curr_bb->instructions.size()) };
-
+        rva_map_[rva_start + instr_offset] = {
+          curr_bb->sym_id, decoded_instr.length };
       }
 
       // TODO: Handle empty basic blocks.

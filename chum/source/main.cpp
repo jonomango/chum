@@ -20,9 +20,9 @@ int main() {
   //create_test_binary();
 
   //auto bin = chum::disassemble("C:\\Users\\realj\\Desktop\\ntoskrnl (19041.1110).exe");
-  //auto bin = chum::disassemble("hello-world-x64.dll");
+  auto bin = chum::disassemble("hello-world-x64.dll");
   //auto bin = chum::disassemble("hello-world-x64-min.dll");
-  auto bin = chum::disassemble("split-block-1030.dll");
+  //auto bin = chum::disassemble("split-block-1030.dll");
 
   if (!bin) {
     std::printf("[!] Failed to disassemble binary.\n");

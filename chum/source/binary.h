@@ -31,7 +31,7 @@ public:
   binary& operator=(binary const&) = delete;
 
   // Print the contents of this binary, for debugging purposes.
-  void print();
+  void print(bool verbose = false);
 
   // Create a new symbol that is assigned a unique symbol ID.
   symbol* create_symbol(symbol_type type, char const* name = nullptr);

@@ -261,20 +261,16 @@ basic_block* binary::create_basic_block(symbol_id const sym_id) {
   sym->bb->fallthrough_target = null_symbol_id;
   sym->bb->instructions       = {};
 
+  // Reserve enough space for atleast 6 instructions, to help performance.
+  sym->bb->instructions.reserve(6);
+
   return sym->bb;
 }
 
 // Create a new basic block, as well as a new code symbol that points
 // to this block. This block contains zero instructions upon creation.
 basic_block* binary::create_basic_block(char const* const name) {
-  auto const sym = create_symbol(symbol_type::code, name);
-
-  sym->bb = basic_blocks_.emplace_back(new basic_block{});
-  sym->bb->sym_id             = sym->id;
-  sym->bb->fallthrough_target = null_symbol_id;
-  sym->bb->instructions       = {};
-
-  return sym->bb;
+  return create_basic_block(create_symbol(symbol_type::code, name)->id);
 }
 
 // Create an empty import module.

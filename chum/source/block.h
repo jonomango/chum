@@ -28,7 +28,7 @@ struct basic_block {
 
   // The instructions that make up this block. The last instruction is a
   // terminating instruction.
-  std::vector<instruction> instructions;
+  std::vector<instruction> instructions = {};
 };
 
 // A data block is a contiguous blob of data.

@@ -1,5 +1,7 @@
 #include "chum.h"
 
+#include <chrono>
+
 void create_test_binary() {
   chum::binary bin = {};
 
@@ -18,17 +20,26 @@ void create_test_binary() {
 
 int main() {
   //create_test_binary();
+  auto const start_time = std::chrono::high_resolution_clock::now();
 
-  //auto bin = chum::disassemble("C:\\Users\\realj\\Desktop\\ntoskrnl (19041.1110).exe");
-  auto bin = chum::disassemble("hello-world-x64.dll");
+  auto bin = chum::disassemble("C:\\Users\\realj\\Desktop\\ntoskrnl (19041.1110).exe");
+  //auto bin = chum::disassemble("hello-world-x64.dll");
   //auto bin = chum::disassemble("hello-world-x64-min.dll");
   //auto bin = chum::disassemble("split-block-1030.dll");
+
+  auto const end_time = std::chrono::high_resolution_clock::now();
+
+  std::printf("[+] Time elapsed: %zums.\n",
+    std::chrono::duration_cast<std::chrono::milliseconds>(
+    end_time - start_time).count());
 
   if (!bin) {
     std::printf("[!] Failed to disassemble binary.\n");
     return 0;
   }
 
-  bin->print();
+  std::printf("[+] Disassembled binary.\n");
+
+  //bin->print();
 }
 

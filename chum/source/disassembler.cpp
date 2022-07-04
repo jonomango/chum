@@ -161,11 +161,11 @@ public:
         assert(rva_map_[rva].sym_id == null_symbol_id);
 
         // Auto-generate a name for this symbol if none was provided.
-        char generated_sym_name[32] = { 0 };
-        if (!name) {
-          sprintf_s(generated_sym_name, "loc_%X", rva);
-          name = generated_sym_name;
-        }
+        //char generated_sym_name[32] = { 0 };
+        //if (!name) {
+          //sprintf_s(generated_sym_name, "loc_%X", rva);
+          //name = generated_sym_name;
+        //}
 
         return rva_map_[rva] = { bin.create_basic_block(name)->sym_id, 0 };
       };
@@ -192,10 +192,11 @@ public:
       }
 
       // Auto-generate a name for this symbol.
-      char generated_sym_name[32] = { 0 };
-      sprintf_s(generated_sym_name, "loc_%X", rva);
+      //char generated_sym_name[32] = { 0 };
+      //sprintf_s(generated_sym_name, "loc_%X", rva);
 
-      auto const new_bb = bin.create_basic_block(generated_sym_name);
+      //auto const new_bb = bin.create_basic_block(generated_sym_name);
+      auto const new_bb = bin.create_basic_block();
 
       // Steal the original block's fallthrough target.
       new_bb->fallthrough_target = original_bb->fallthrough_target;
@@ -231,9 +232,9 @@ public:
 
       // This is the basic block that we're constructing.
       assert(bin.get_symbol(rva_map_[rva_start].sym_id)->type == symbol_type::code);
-      auto const curr_bb = bin.get_symbol(rva_map_[rva_start].sym_id)->bb;
+      auto curr_bb = bin.get_symbol(rva_map_[rva_start].sym_id)->bb;
 
-      std::printf("[+] Started basic block at RVA 0x%X.\n", rva_start);
+      //std::printf("[+] Started basic block at RVA 0x%X.\n", rva_start);
 
       // Keep decoding until we hit a terminating instruction.
       for (std::uint32_t instr_offset = 0;
@@ -252,7 +253,7 @@ public:
             curr_instr_buffer, remaining_buffer_length, &decoded_instr))) {
           std::printf("[!] Failed to decode instruction.\n");
           std::printf("[!]   RVA: 0x%X.\n", rva_start + instr_offset);
-          return false;
+          break;
         }
 
         // This is the instruction that we'll be adding to the basic block. It
@@ -280,8 +281,14 @@ public:
 
             // We jumped into the middle of a basic block.
             if (target_rva_entry.blink != 0) {
-              std::printf("[+]   Splitting basic block.\n");
+              //std::printf("[+]   Splitting basic block. RVA: %X.\n", target_rva);
               target_rva_entry = split_block(target_rva);
+
+              // TODO: Should this be <= ?
+              // This happens if we need to split the current block that
+              // we're building.
+              if (target_rva >= rva_start && target_rva < rva_start + instr_offset)
+                curr_bb = bin.get_symbol(target_rva_entry.sym_id)->bb;
             }
             // This is undiscovered code, add it to the disassembly queue.
             else if (target_rva_entry.sym_id == null_symbol_id)
@@ -324,12 +331,15 @@ public:
               assert(target_rva_entry.blink == 0);
 
               // Create a name for this symbol that contains the target RVA.
-              char symbol_name[32] = { 0 };
-              sprintf_s(symbol_name, "unk_%X", target_rva);
-
-              // Create the new symbol and add it to the RVA map.
+              //char symbol_name[32] = { 0 };
+              //sprintf_s(symbol_name, "unk_%X", target_rva);
+              //
+              //// Create the new symbol and add it to the RVA map.
+              //target_rva_entry = rva_map_[target_rva] = {
+              //  bin.create_symbol(symbol_type::data, symbol_name)->id, 0 };
+              //Create the new symbol and add it to the RVA map.
               target_rva_entry = rva_map_[target_rva] = {
-                bin.create_symbol(symbol_type::data, symbol_name)->id, 0 };
+                bin.create_symbol(symbol_type::data)->id, 0 };
             }
 
             // Modify the displacement bytes to point to a symbol ID instead.
@@ -349,7 +359,9 @@ public:
         // If this is a terminating instruction, end the block.
         if (decoded_instr.meta.category == ZYDIS_CATEGORY_RET ||
             decoded_instr.meta.category == ZYDIS_CATEGORY_COND_BR ||
-            decoded_instr.meta.category == ZYDIS_CATEGORY_UNCOND_BR) {
+            decoded_instr.meta.category == ZYDIS_CATEGORY_UNCOND_BR ||
+            (decoded_instr.meta.category == ZYDIS_CATEGORY_INTERRUPT &&
+             decoded_instr.raw.imm[0].value.s == 0x29)) {
           // Conditional branches require a fallthrough target.
           if (decoded_instr.meta.category == ZYDIS_CATEGORY_COND_BR) {
             auto const fallthrough_rva = static_cast<std::uint32_t>(rva_start +
@@ -380,11 +392,22 @@ public:
         instr_offset += instr.length;
 
         // If we've entered into another basic block, end the current block.
-        if (auto const rva_entry = rva_map_[rva_start + instr_offset];
+        if (auto rva_entry = rva_map_[rva_start + instr_offset];
             rva_entry.sym_id != null_symbol_id) {
+          auto const sym = bin.get_symbol(rva_entry.sym_id);
+
+          // We incorrectly identified this symbol as data instead of code.
+          if (sym->type == symbol_type::data) {
+            sym->type = symbol_type::code;
+            //sym->name = "data -> code";
+            sym->bb = bin.create_basic_block(sym->id);
+            disassembly_queue.push(rva_start + instr_offset);
+            rva_entry = rva_map_[rva_start + instr_offset] = { sym->id, 0 };
+          }
+
           // TODO: It *might* be possible to accidently fall into a jump table
           //       (which would be marked as data, not code).
-          assert(bin.get_symbol(rva_entry.sym_id)->type == symbol_type::code);
+          assert(sym->type == symbol_type::code);
           curr_bb->fallthrough_target = rva_entry.sym_id;
 
           break;

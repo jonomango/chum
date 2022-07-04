@@ -19,7 +19,6 @@ void create_test_binary() {
 }
 
 int main() {
-  //create_test_binary();
   auto const start_time = std::chrono::high_resolution_clock::now();
 
   //auto bin = chum::disassemble("C:\\Users\\realj\\Desktop\\ntoskrnl (19041.1110).exe");

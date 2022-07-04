@@ -69,6 +69,10 @@ public:
     rva_map_ = std::vector<rva_map_entry>(
       nt_header_->OptionalHeader.SizeOfImage, rva_map_entry{});
 
+    // Add the entrypoint to the disassembly queue.
+    if (nt_header_->OptionalHeader.AddressOfEntryPoint)
+      enqueue_rva(nt_header_->OptionalHeader.AddressOfEntryPoint, "<entrypoint>");
+
     return true;
   }
 
@@ -100,18 +104,17 @@ public:
     }
   }
 
-  // Create a symbol for every PE import.
-  void create_import_symbols() {
-    auto const import_data_dir = nt_header_->OptionalHeader.DataDirectory[
-      IMAGE_DIRECTORY_ENTRY_IMPORT];
+  // Create an import routine for every PE import.
+  void parse_imports() {
+    auto const idata =
+      nt_header_->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
 
-    // No imports. :(
-    if (!import_data_dir.VirtualAddress || import_data_dir.Size <= 0)
+    if (!idata.VirtualAddress || idata.Size <= 0)
       return;
 
     // An import descriptor essentially represents a DLL that we are importing from.
     auto import_descriptor = reinterpret_cast<PIMAGE_IMPORT_DESCRIPTOR>(
-      &file_buffer_[rva_to_file_offset(import_data_dir.VirtualAddress)]);
+      &file_buffer_[rva_to_file_offset(idata.VirtualAddress)]);
 
     // Iterate over every import descriptor until we hit the null terminator.
     for (; import_descriptor->OriginalFirstThunk; ++import_descriptor) {
@@ -145,31 +148,85 @@ public:
     }
   }
 
+  // Add function exports to the disassembly queue.
+  void parse_exports() {
+    auto const edata =
+      nt_header_->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT];
+
+    if (!edata.VirtualAddress || edata.Size <= 0)
+      return;
+
+    auto const exports = reinterpret_cast<PIMAGE_EXPORT_DIRECTORY>(
+      &file_buffer_[rva_to_file_offset(edata.VirtualAddress)]);
+    auto const names = reinterpret_cast<std::uint32_t*>(
+      &file_buffer_[rva_to_file_offset(exports->AddressOfNames)]);
+    auto const ordinals = reinterpret_cast<std::uint16_t*>(
+      &file_buffer_[rva_to_file_offset(exports->AddressOfNameOrdinals)]);
+    auto const functions = reinterpret_cast<std::uint32_t*>(
+      &file_buffer_[rva_to_file_offset(exports->AddressOfFunctions)]);
+
+    // Iterate over every export (including those without a name) and create
+    // a symbol for them. If this is a function export, add it to the
+    // disassembly queue as well.
+    for (std::uint32_t ordinal = 0; ordinal < exports->NumberOfFunctions; ++ordinal) {
+      auto const rva = functions[ordinal];
+
+      // This can occur when a DLL exports the same function by multiple
+      // names.
+      if (rva_map_[rva].sym_id != null_symbol_id)
+        continue;
+
+      // Forwarders point to a null-terminated name, rather than code/data.
+      // TODO: We should make a new symbol for forwarders that are aliases
+      //       of existing import symbols.
+      // 
+      // if (rva >= edata.VirtualAddress && rva < (edata.VirtualAddress + edata.Size))
+
+      // Get the section that this export lies in.
+      auto const section = rva_to_section(rva);
+      assert(section != nullptr);
+
+      // If the RVA lands in executable memory, assume that it is a
+      // function export. Otherwise, create a data symbol.
+      if (section->Characteristics & IMAGE_SCN_MEM_EXECUTE)
+        enqueue_rva(rva);
+      else {
+        assert(section->Characteristics & IMAGE_SCN_MEM_READ);
+
+        // Create a new data symbol.
+        auto const sym = bin.create_symbol(symbol_type::data);
+        rva_map_[rva] = { sym->id, 0 };
+      }
+    }
+
+    // Iterate over every named export and give their symbols a name.
+    for (std::uint32_t i = 0; i < exports->NumberOfNames; ++i) {
+      auto const ordinal = ordinals[i];
+      auto const rva = functions[ordinal];
+      auto const name = reinterpret_cast<char const*>(
+        &file_buffer_[rva_to_file_offset(names[i])]);
+
+      // Get the symbol for this export.
+      auto const sym = bin.get_symbol(rva_map_[rva].sym_id);
+      assert(sym->id != null_symbol_id);
+
+      sym->name = name;
+    }
+
+    // First pass: create symbols.
+    // Second pass: add names.
+  }
+
+  // Parse the exceptions directory and add any exception handlers to the
+  // disassembly queue.
+  void parse_exceptions() {
+    // It *might* be safe to treat RUNTIME_FUNCTIONs as the start of basic
+    // blocks, although this would have to be double-checked very thoroughly.
+  }
+
   // The main engine of the recursive disassembler. This tries to distinguish
   // code from data and form the basic blocks that compose this binary.
   bool disassemble() {
-    // A queue of RVAs to disassemble from.
-    std::queue<std::uint32_t> disassembly_queue = {};
-
-    // Add the specified RVA to the disassembly queue and return the
-    // code symbol ID that points to the created basic block.
-    auto const enqueue_code_rva =
-      [&](std::uint32_t const rva, char const* name = nullptr) {
-        disassembly_queue.push(rva);
-
-        // Make sure we're not creating a duplicate symbol.
-        assert(rva_map_[rva].sym_id == null_symbol_id);
-
-        // Auto-generate a name for this symbol if none was provided.
-        //char generated_sym_name[32] = { 0 };
-        //if (!name) {
-          //sprintf_s(generated_sym_name, "loc_%X", rva);
-          //name = generated_sym_name;
-        //}
-
-        return rva_map_[rva] = { bin.create_basic_block(name)->sym_id, 0 };
-      };
-
     // Split the basic block at the specified RVA into two, and return the
     // new RVA entry.
     auto const split_block = [&](std::uint32_t const rva) {
@@ -213,16 +270,10 @@ public:
       return rva_map_[rva] = { new_bb->sym_id, 0 };
     };
 
-    // Add the entrypoint to the disassembly queue.
-    if (nt_header_->OptionalHeader.AddressOfEntryPoint) {
-      enqueue_code_rva(
-        nt_header_->OptionalHeader.AddressOfEntryPoint, "entrypoint");
-    }
-
-    while (!disassembly_queue.empty()) {
+    while (!disassembly_queue_.empty()) {
       // Pop an RVA from the front of the queue.
-      auto const rva_start = disassembly_queue.front();
-      disassembly_queue.pop();
+      auto const rva_start = disassembly_queue_.front();
+      disassembly_queue_.pop();
 
       auto const file_start = rva_to_file_offset(rva_start);
 
@@ -292,7 +343,7 @@ public:
             }
             // This is undiscovered code, add it to the disassembly queue.
             else if (target_rva_entry.sym_id == null_symbol_id)
-              target_rva_entry = enqueue_code_rva(target_rva);
+              target_rva_entry = enqueue_rva(target_rva);
 
             assert(target_rva_entry.blink == 0);
 
@@ -382,7 +433,7 @@ public:
             // the disassembly queue.
             else {
               curr_bb->fallthrough_target = 
-                enqueue_code_rva(fallthrough_rva).sym_id;
+                enqueue_rva(fallthrough_rva).sym_id;
             }
           }
 
@@ -399,10 +450,8 @@ public:
           // We incorrectly identified this symbol as data instead of code.
           if (sym->type == symbol_type::data) {
             sym->type = symbol_type::code;
-            //sym->name = "data -> code";
-            sym->bb = bin.create_basic_block(sym->id);
-            disassembly_queue.push(rva_start + instr_offset);
-            rva_entry = rva_map_[rva_start + instr_offset] = { sym->id, 0 };
+            sym->name = "data_to_code";
+            rva_entry = enqueue_rva(rva_start + instr_offset, sym->id);
           }
 
           // TODO: It *might* be possible to accidently fall into a jump table
@@ -429,13 +478,50 @@ private:
   // Convert an RVA to its corresponding file offset by iterating over every
   // PE section and translating accordingly.
   std::uint32_t rva_to_file_offset(std::uint32_t const rva) {
+    auto const sec = rva_to_section(rva);
+    if (!sec)
+      return 0;
+
+    return sec->PointerToRawData + (rva - sec->VirtualAddress);
+  }
+
+  // Get the section that an RVA is located inside of.
+  PIMAGE_SECTION_HEADER rva_to_section(std::uint32_t const rva) {
     for (std::size_t i = 0; i < nt_header_->FileHeader.NumberOfSections; ++i) {
-      auto const& sec = sections_[i];
+      auto& sec = sections_[i];
       if (rva >= sec.VirtualAddress && rva < (sec.VirtualAddress + sec.Misc.VirtualSize))
-        return sec.PointerToRawData + (rva - sec.VirtualAddress);
+        return &sec;
     }
 
-    return 0;
+    return nullptr;
+  }
+
+  // Add an RVA to the disassembly queue. This function will create a basic
+  // block and code symbol for the specified RVA.
+  rva_map_entry& enqueue_rva(
+      std::uint32_t const rva, char const* const name = nullptr) {
+    disassembly_queue_.push(rva);
+
+    // Make sure we're not creating a duplicate symbol.
+    assert(rva_map_[rva].sym_id == null_symbol_id);
+
+    return rva_map_[rva] = { bin.create_basic_block(name)->sym_id, 0 };
+  }
+
+  // Add an RVA to the disassembly queue. This function will create a basic
+  // block for the specified RVA. The provided code symbol will point to the
+  // new basic block. This should be used when a symbol has already been
+  // created, but it was never disassembled.
+  rva_map_entry& enqueue_rva(std::uint32_t const rva, symbol_id const sym_id) {
+    disassembly_queue_.push(rva);
+
+    // Make sure this is a code symbol.
+    assert(bin.get_symbol(sym_id)->type == symbol_type::code);
+
+    // Create a new basic block.
+    bin.create_basic_block(sym_id);
+
+    return rva_map_[rva] = { sym_id, 0 };
   }
 
 private:
@@ -444,13 +530,16 @@ private:
   // The raw file contents.
   std::vector<std::uint8_t> file_buffer_ = {};
 
+  // A map that contains RVAs and their metadata.
+  std::vector<rva_map_entry> rva_map_ = {};
+
+  // A queue of code RVAs to disassemble from.
+  std::queue<std::uint32_t> disassembly_queue_ = {};
+
   // Pointers into the file buffer for commonly used PE structures.
   PIMAGE_DOS_HEADER     dos_header_ = nullptr;
   PIMAGE_NT_HEADERS     nt_header_  = nullptr;
   PIMAGE_SECTION_HEADER sections_   = nullptr;
-
-  // A map that contains RVAs and their metadata.
-  std::vector<rva_map_entry> rva_map_ = {};
 };
 
 // Disassemble an x86-64 PE file.
@@ -464,8 +553,10 @@ std::optional<disassembled_binary> disassemble(char const* const path) {
   // Create a data block for every data section.
   dasm.create_section_data_blocks();
 
-  // Create symbols for every PE import.
-  dasm.create_import_symbols();
+  // Extract as much metadata as possible from the PE file.
+  dasm.parse_imports();
+  dasm.parse_exports();
+  dasm.parse_exceptions();
 
   if (!dasm.disassemble())
     return {};

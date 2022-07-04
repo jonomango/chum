@@ -139,7 +139,7 @@ void binary::print(bool const verbose) {
     std::printf("[+]\n");
   }
 
-  std::printf("[+] Imports (%zu modules):\n", import_modules_.size());
+  std::printf("[+] Import modules (%zu):\n", import_modules_.size());
 
   if (verbose) {
     for (auto const& mod : import_modules_) {

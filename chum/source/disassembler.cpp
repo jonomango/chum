@@ -106,7 +106,7 @@ public:
 
   // Create an import routine for every PE import.
   void parse_imports() {
-    auto const idata =
+    auto const& idata =
       nt_header_->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
 
     if (!idata.VirtualAddress || idata.Size <= 0)
@@ -150,7 +150,7 @@ public:
 
   // Add function exports to the disassembly queue.
   void parse_exports() {
-    auto const edata =
+    auto const& edata =
       nt_header_->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT];
 
     if (!edata.VirtualAddress || edata.Size <= 0)
@@ -220,8 +220,23 @@ public:
   // Parse the exceptions directory and add any exception handlers to the
   // disassembly queue.
   void parse_exceptions() {
-    // It *might* be safe to treat RUNTIME_FUNCTIONs as the start of basic
-    // blocks, although this would have to be double-checked very thoroughly.
+    auto const& pdata =
+      nt_header_->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXCEPTION];
+
+    if (!pdata.VirtualAddress || pdata.Size <= 0)
+      return;
+
+    auto const runtime_funcs = reinterpret_cast<PRUNTIME_FUNCTION>(
+      &file_buffer_[rva_to_file_offset(pdata.VirtualAddress)]);
+    auto const runtime_funcs_count = pdata.Size / sizeof(RUNTIME_FUNCTION);
+
+    for (std::size_t i = 0; i < runtime_funcs_count; ++i) {
+      auto const& func = runtime_funcs[i];
+
+      // Add the start address of the RUNTIME_FUNCTION to the disassembly queue.
+      if (rva_map_[func.BeginAddress].sym_id == null_symbol_id)
+        enqueue_rva(func.BeginAddress, "runtime_func");
+    }
   }
 
   // The main engine of the recursive disassembler. This tries to distinguish
@@ -500,6 +515,9 @@ private:
   // block and code symbol for the specified RVA.
   rva_map_entry& enqueue_rva(
       std::uint32_t const rva, char const* const name = nullptr) {
+    // This RVA better point to executable code...
+    assert(rva_to_section(rva)->Characteristics & IMAGE_SCN_MEM_EXECUTE);
+
     disassembly_queue_.push(rva);
 
     // Make sure we're not creating a duplicate symbol.

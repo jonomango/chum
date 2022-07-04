@@ -8,6 +8,38 @@
 
 namespace chum {
 
+// https://docs.microsoft.com/en-us/cpp/build/exception-handling-x64?view=msvc-170
+// Definitions used for exception handling.
+union UNWIND_CODE {
+  struct {
+    std::uint8_t CodeOffset;
+    std::uint8_t UnwindOp : 4;
+    std::uint8_t OpInfo   : 4;
+  };
+  std::uint16_t FrameOffset;
+};
+struct UNWIND_INFO {
+  std::uint8_t Version       : 3;
+  std::uint8_t Flags         : 5;
+  std::uint8_t SizeOfProlog;
+  std::uint8_t CountOfCodes;
+  std::uint8_t FrameRegister : 4;
+  std::uint8_t FrameOffset   : 4;
+
+  // This is a variable-length array (real size is CountOfCodes).
+  UNWIND_CODE UnwindCode[1];
+};
+struct SCOPE_TABLE {
+  std::uint32_t Count;
+  struct {
+    std::uint32_t Begin;
+    std::uint32_t End;
+    std::uint32_t Handler;
+    std::uint32_t Target;
+  } ScopeRecords[1];
+};
+
+// This contains information about an RVA.
 struct rva_map_entry {
   // If the blink is 0, this is the symbol that this RVA lands in.
   symbol_id sym_id = null_symbol_id;
@@ -138,6 +170,11 @@ public:
           &file_buffer_[rva_to_file_offset(static_cast<std::uint32_t>(
           orig_first_thunk->u1.AddressOfData))]);
 
+        // This might cause issues if a DLL exports a routine by the same
+        // name but... who cares.
+        if (strcmp(import_by_name->Name, "__C_specific_handler") == 0)
+          import_C_specific_handler = first_thunk_rva;
+
         // Create an import routine.
         auto const routine = imp_mod->create_routine(import_by_name->Name);
 
@@ -206,6 +243,10 @@ public:
       auto const name = reinterpret_cast<char const*>(
         &file_buffer_[rva_to_file_offset(names[i])]);
 
+      // This is targetted towards ntoskrnl.exe.
+      if (strcmp(name, "__C_specific_handler") == 0)
+        export_C_specific_handler = rva;
+
       // Get the symbol for this export.
       auto const sym = bin.get_symbol(rva_map_[rva].sym_id);
       assert(sym->id != null_symbol_id);
@@ -233,9 +274,87 @@ public:
     for (std::size_t i = 0; i < runtime_funcs_count; ++i) {
       auto const& func = runtime_funcs[i];
 
+      // Ignore addresses that don't land in an executable section. An
+      // example of this occurs in ntoskrnl.exe, at the start of the
+      // INITDATA section.
+      if (!rva_in_exec_section(func.BeginAddress))
+        continue;
+
       // Add the start address of the RUNTIME_FUNCTION to the disassembly queue.
       if (rva_map_[func.BeginAddress].sym_id == null_symbol_id)
-        enqueue_rva(func.BeginAddress, "runtime_func");
+        enqueue_rva(func.BeginAddress);
+
+      // Get the unwind info associated with this function entry.
+      assert(func.UnwindInfoAddress != 0);
+      auto const unwind_info = reinterpret_cast<UNWIND_INFO*>(
+        &file_buffer_[rva_to_file_offset(func.UnwindInfoAddress)]);
+
+      // This function doesn't have an exception handler or termination handler.
+      if (!(unwind_info->Flags & UNW_FLAG_EHANDLER) &&
+          !(unwind_info->Flags & UNW_FLAG_UHANDLER))
+        continue;
+
+      // The RVA to the handler is stored right after the variable-length
+      // array of unwind codes. The array is always aligned to an even number
+      // of entries, which is why we need to do this annoying calculation.
+      auto const handler = reinterpret_cast<std::uint32_t*>(
+        &unwind_info->UnwindCode[(unwind_info->CountOfCodes + 1) & ~1]);
+      assert(*handler != 0);
+
+      // Add the language-specific exception handler, if it hasn't already
+      // been added.
+      if (rva_map_[*handler].sym_id == null_symbol_id)
+        enqueue_rva(*handler);
+
+      auto const is_c_specific_handler = [&](std::uint32_t const rva) {
+        if (rva == export_C_specific_handler)
+          return true;
+
+        auto const ptr = reinterpret_cast<std::uint8_t*>(
+          &file_buffer_[rva_to_file_offset(rva)]);
+
+        // jmp __imp___C_specific_handler
+        if (ptr[0] == 0xFF &&
+            ptr[1] == 0x25 &&
+            rva + 6 + *reinterpret_cast<std::uint32_t*>(ptr + 2) == import_C_specific_handler)
+          return true;
+
+        // REX.w jmp __imp___C_specific_handler
+        if (ptr[0] == 0x48 &&
+            ptr[1] == 0xFF &&
+            ptr[2] == 0x25 &&
+            rva + 7 + *reinterpret_cast<std::uint32_t*>(ptr + 3) == import_C_specific_handler)
+          return true;
+
+        return false;
+      };
+
+      // The SCOPE_TABLE language-specific data only applies if the handler
+      // is the __C_specific_handler.
+      if (!is_c_specific_handler(*handler))
+        continue;
+
+      // The language-specific data is stored right after the handler.
+      auto const scope_table = reinterpret_cast<SCOPE_TABLE*>(handler + 1);
+
+      for (std::uint32_t j = 0; j < scope_table->Count; ++j) {
+        auto const& scope = scope_table->ScopeRecords[j];
+
+        // Add the exception filter.
+        if (rva_map_[scope.Handler].sym_id == null_symbol_id &&
+            rva_in_exec_section(scope.Handler))
+          enqueue_rva(scope.Handler);
+
+        // Add the __try block.
+        if (rva_map_[scope.Begin].sym_id == null_symbol_id &&
+            rva_in_exec_section(scope.Begin))
+          enqueue_rva(scope.Begin);
+
+        // Add the __except block.
+        if (rva_map_[scope.Target].sym_id == null_symbol_id &&
+            rva_in_exec_section(scope.Target))
+          enqueue_rva(scope.Target);
+      }
     }
   }
 
@@ -296,6 +415,9 @@ public:
       if (file_start == 0)
         continue;
 
+      auto const section = rva_to_section(rva_start);
+      auto const file_end = file_start + section->SizeOfRawData;
+
       // This is the basic block that we're constructing.
       assert(bin.get_symbol(rva_map_[rva_start].sym_id)->type == symbol_type::code);
       auto curr_bb = bin.get_symbol(rva_map_[rva_start].sym_id)->bb;
@@ -304,7 +426,7 @@ public:
 
       // Keep decoding until we hit a terminating instruction.
       for (std::uint32_t instr_offset = 0;
-           file_start + instr_offset < file_buffer_.size();) {
+           file_start + instr_offset < file_end;) {
         // A pointer to the current instruction in the raw binary.
         auto const curr_instr_buffer = &file_buffer_[file_start + instr_offset];
 
@@ -357,8 +479,10 @@ public:
                 curr_bb = bin.get_symbol(target_rva_entry.sym_id)->bb;
             }
             // This is undiscovered code, add it to the disassembly queue.
-            else if (target_rva_entry.sym_id == null_symbol_id)
-              target_rva_entry = enqueue_rva(target_rva);
+            else if (target_rva_entry.sym_id == null_symbol_id) {
+              if (rva_in_exec_section(target_rva))
+                target_rva_entry = enqueue_rva(target_rva);
+            }
 
             assert(target_rva_entry.blink == 0);
 
@@ -511,12 +635,21 @@ private:
     return nullptr;
   }
 
+  // Return true if the provided RVA is in an executable section.
+  bool rva_in_exec_section(std::uint32_t const rva) {
+    auto const sec = rva_to_section(rva);
+    if (!sec)
+      return false;
+
+    return sec->Characteristics & IMAGE_SCN_MEM_EXECUTE;
+  }
+
   // Add an RVA to the disassembly queue. This function will create a basic
   // block and code symbol for the specified RVA.
   rva_map_entry& enqueue_rva(
       std::uint32_t const rva, char const* const name = nullptr) {
     // This RVA better point to executable code...
-    assert(rva_to_section(rva)->Characteristics & IMAGE_SCN_MEM_EXECUTE);
+    assert(rva_in_exec_section(rva));
 
     disassembly_queue_.push(rva);
 
@@ -531,6 +664,9 @@ private:
   // new basic block. This should be used when a symbol has already been
   // created, but it was never disassembled.
   rva_map_entry& enqueue_rva(std::uint32_t const rva, symbol_id const sym_id) {
+    // This RVA better point to executable code...
+    assert(rva_in_exec_section(rva));
+
     disassembly_queue_.push(rva);
 
     // Make sure this is a code symbol.
@@ -558,6 +694,11 @@ private:
   PIMAGE_DOS_HEADER     dos_header_ = nullptr;
   PIMAGE_NT_HEADERS     nt_header_  = nullptr;
   PIMAGE_SECTION_HEADER sections_   = nullptr;
+
+  // This is the RVA of the "__C_specific_handler" import/export,
+  // if it is present.
+  std::uint32_t import_C_specific_handler = 0;
+  std::uint32_t export_C_specific_handler = 0;
 };
 
 // Disassemble an x86-64 PE file.

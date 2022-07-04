@@ -41,5 +41,9 @@ int main() {
   std::printf("[+] Disassembled binary.\n");
 
   bin->print();
+
+  // Bugs:
+  // 1. ntoskrnl.exe INITDATA section has a function at the start, yet it
+  //    isn't marked as +X, only +RW.
 }
 

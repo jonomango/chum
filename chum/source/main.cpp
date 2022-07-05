@@ -3,6 +3,12 @@
 #include <chrono>
 
 void transform(chum::binary& bin) {
+  auto const hello_world_str = bin.create_data_block("Hello world!", 13);
+  hello_world_str->read_only = true;
+
+  // Create a symbol to the string.
+  auto const hello_world_sym = bin.create_symbol(chum::symbol_type::data);
+
   // Create a basic block that opens a message box.
   auto const ibb = bin.create_basic_block("instrumentation_block");
   ibb->instructions.push_back({ 1, { 0xCC } }); // INT3
@@ -23,9 +29,9 @@ int main() {
   auto const start_time = std::chrono::high_resolution_clock::now();
 
   //auto bin = chum::disassemble("C:\\Users\\realj\\Desktop\\ntoskrnl (19041.1110).exe");
-  //auto bin = chum::disassemble("C:\\Users\\realj\\Desktop\\dxgkrnl (lizerd).sys");
+  auto bin = chum::disassemble("C:\\Users\\realj\\Desktop\\dxgkrnl (lizerd).sys");
   //auto bin = chum::disassemble("hello-world-x64.dll");
-  auto bin = chum::disassemble("hello-world-x64-min.dll");
+  //auto bin = chum::disassemble("hello-world-x64-min.dll");
   //auto bin = chum::disassemble("split-block-1030.dll");
 
   auto const end_time = std::chrono::high_resolution_clock::now();
@@ -41,13 +47,8 @@ int main() {
 
   std::printf("[+] Disassembled binary.\n");
 
-  transform(*bin);
+  //transform(*bin);
 
-  bin->print(true);
-
-  // Bugs:
-  // 1. ntoskrnl.exe INITDATA section has a function at the start, yet it
-  //    isn't marked as +X, only +RW.
-  // 2. 221 vs 235 (hello-world-x64.dll)
+  bin->print();
 }
 

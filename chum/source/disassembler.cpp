@@ -310,8 +310,6 @@ public:
       assert(bin.get_symbol(rva_map_[rva_start].sym_id)->type == symbol_type::code);
       auto curr_bb = bin.get_symbol(rva_map_[rva_start].sym_id)->bb;
 
-      //std::printf("[+] Started basic block at RVA 0x%X.\n", rva_start);
-
       // Keep decoding until we hit a terminating instruction.
       for (std::uint32_t instr_offset = 0;
            file_start + instr_offset < file_end;) {
@@ -357,7 +355,6 @@ public:
 
             // We jumped into the middle of a basic block.
             if (target_rva_entry.blink != 0) {
-              //std::printf("[+]   Splitting basic block. RVA: %X.\n", target_rva);
               target_rva_entry = split_block(target_rva);
 
               // TODO: Should this be <= ?
@@ -408,13 +405,6 @@ public:
             if (target_rva_entry.sym_id == null_symbol_id) {
               assert(target_rva_entry.blink == 0);
 
-              // Create a name for this symbol that contains the target RVA.
-              //char symbol_name[32] = { 0 };
-              //sprintf_s(symbol_name, "unk_%X", target_rva);
-              //
-              //// Create the new symbol and add it to the RVA map.
-              //target_rva_entry = rva_map_[target_rva] = {
-              //  bin.create_symbol(symbol_type::data, symbol_name)->id, 0 };
               //Create the new symbol and add it to the RVA map.
               target_rva_entry = rva_map_[target_rva] = {
                 bin.create_symbol(symbol_type::data)->id, 0 };
@@ -506,6 +496,70 @@ public:
       if (bb->instructions.empty())
         return false;
     }
+
+    // This is the number of symbols/bbs that are in the RVA map.
+    std::size_t bb_count = 0;
+    std::size_t sym_count = 0;
+
+    for (std::uint32_t rva = 0; rva < rva_map_.size(); ++rva) {
+      auto const& entry = rva_map_[rva];
+
+      // There is nothing at this RVA.
+      if (entry.blink == 0 && entry.sym_id == null_symbol_id)
+        continue;
+
+      // This is an instruction entry.
+      if (entry.blink != 0) {
+        std::size_t instr_count = 0;
+
+        // Count the number of instructions from the current RVA to the root
+        // node.
+        for (auto curr_rva = rva; true;) {
+          ++instr_count;
+
+          // We reached the root basic block.
+          if (rva_map_[curr_rva].blink == 0) {
+            if (rva_map_[curr_rva].sym_id == null_symbol_id)
+              return false;
+
+            auto const root = bin.get_symbol(rva_map_[curr_rva].sym_id);
+            if (!root)
+              return false;
+
+            if (root->type != symbol_type::code)
+              return false;
+
+            if (instr_count > root->bb->instructions.size())
+              return false;
+
+            break;
+          }
+
+          curr_rva -= rva_map_[curr_rva].blink;
+        }
+
+        continue;
+      }
+
+      auto const sym = bin.get_symbol(entry.sym_id);
+      if (!sym)
+        return false;
+
+      ++sym_count;
+
+      if (sym->type == symbol_type::code)
+        ++bb_count;
+    }
+
+    // Make sure the RVA map and the binary report the same number of
+    // basic blocks.
+    if (bb_count != bin.basic_blocks().size())
+      return false;
+
+    // Make sure the RVA map and the binary report the same number of
+    // symbols (the +1 is for the null symbol).
+    if (sym_count + 1 != bin.symbols().size())
+      return false;
 
     return true;
   }

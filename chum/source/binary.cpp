@@ -294,5 +294,44 @@ import_module* binary::create_import_module(char const* const name) {
   return import_modules_.emplace_back(new import_module(*this, name));
 }
 
+// Get an import routine.
+import_routine* binary::get_import_routine(
+    char const* const module_name, char const* const routine_name) {
+  // Search for the matching import module.
+  for (auto const mod : import_modules_) {
+    if (_stricmp(mod->name(), module_name) != 0)
+      continue;
+
+    // Search for the routine in this module.
+    for (auto const routine : mod->routines()) {
+      if (_stricmp(routine->name.c_str(), routine_name) == 0)
+        return routine;
+    }
+  }
+
+  return nullptr;
+}
+
+// Get an import routine. If the routine could not be found, create the
+// routine.
+import_routine* binary::get_or_create_import_routine(
+    char const* const module_name, char const* const routine_name) {
+  // Search for the matching import module.
+  for (auto const mod : import_modules_) {
+    if (_stricmp(mod->name(), module_name) != 0)
+      continue;
+
+    // Search for the routine in this module.
+    for (auto const routine : mod->routines()) {
+      if (_stricmp(routine->name.c_str(), routine_name) == 0)
+        return routine;
+    }
+
+    return mod->create_routine(routine_name);
+  }
+
+  return create_import_module(module_name)->create_routine(routine_name);
+}
+
 } // namespace chum
 

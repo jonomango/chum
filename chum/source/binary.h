@@ -68,6 +68,15 @@ public:
   // Create an empty import module.
   import_module* create_import_module(char const* name);
 
+  // Get an import routine.
+  import_routine* get_import_routine(
+    char const* module_name, char const* routine_name);
+
+  // Get an import routine. If the routine could not be found, create the
+  // routine.
+  import_routine* get_or_create_import_routine(
+    char const* module_name, char const* routine_name);
+
 private:
   ZydisDecoder decoder_ = {};
   ZydisFormatter formatter_ = {};

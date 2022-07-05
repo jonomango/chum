@@ -14,6 +14,9 @@ struct instruction {
   // This is a variable-length array that contains the raw instruction bytes.
   // TODO: Actually make this variable-length...
   std::uint8_t bytes[15] = {};
+
+  // Create a CALL instruction to the specified basic block.
+  static instruction call(struct basic_block* bb);
 };
 
 } // namespace chum

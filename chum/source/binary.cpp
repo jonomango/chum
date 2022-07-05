@@ -224,6 +224,11 @@ symbol* binary::get_symbol(symbol_id const sym_id) {
   return symbols_[sym_id];
 }
 
+// Get every symbol.
+std::vector<symbol*>& binary::symbols() {
+  return symbols_;
+}
+
 // Create a zero-initialized data block of the specified size and alignment.
 data_block* binary::create_data_block(
     std::uint32_t const size, std::uint32_t const alignment) {
@@ -246,6 +251,11 @@ data_block* binary::create_data_block(void const* const data,
   db->alignment = alignment;
   db->read_only = false;
   return db;
+}
+
+// Get every data block.
+std::vector<data_block*> binary::data_blocks() {
+  return data_blocks_;
 }
 
 // Create a new basic block for the specific code symbol. This block
@@ -271,6 +281,11 @@ basic_block* binary::create_basic_block(symbol_id const sym_id) {
 // to this block. This block contains zero instructions upon creation.
 basic_block* binary::create_basic_block(char const* const name) {
   return create_basic_block(create_symbol(symbol_type::code, name)->id);
+}
+
+// Get every basic block.
+std::vector<basic_block*> binary::basic_blocks() {
+  return basic_blocks_;
 }
 
 // Create an empty import module.

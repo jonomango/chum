@@ -22,13 +22,15 @@ static ZyanStatus hook_zydis_format_operand_mem(
   auto const sym_id = *reinterpret_cast<std::uint64_t const*>(&context->operand->mem.disp.value) & mask;
   auto const sym = sym_table[sym_id];
 
-  if (sym->name.empty())
-    return orig_zydis_format_operand_imm(formatter, buffer, context);
-
-  ZydisFormatterBufferAppend(buffer, ZYDIS_TOKEN_SYMBOL);
   ZyanString* string;
+  ZydisFormatterBufferAppend(buffer, ZYDIS_TOKEN_SYMBOL);
   ZydisFormatterBufferGetString(buffer, &string);
-  ZyanStringAppendFormat(string, "%s", sym->name.c_str());
+
+  if (!sym->name.empty())
+    ZyanStringAppendFormat(string, "%s", sym->name.c_str());
+  else
+    ZyanStringAppendFormat(string, "symbol_%u", sym->id);
+
 
   return ZYAN_STATUS_SUCCESS;
 }
@@ -44,13 +46,14 @@ static ZyanStatus hook_zydis_format_operand_imm(
   auto const& sym_table = *reinterpret_cast<std::vector<symbol*>*>(context->user_data);
   auto const sym = sym_table[context->operand->imm.value.u & mask];
 
-  if (sym->name.empty())
-    return orig_zydis_format_operand_imm(formatter, buffer, context);
-
-  ZydisFormatterBufferAppend(buffer, ZYDIS_TOKEN_SYMBOL);
   ZyanString* string;
+  ZydisFormatterBufferAppend(buffer, ZYDIS_TOKEN_SYMBOL);
   ZydisFormatterBufferGetString(buffer, &string);
-  ZyanStringAppendFormat(string, "%s", sym->name.c_str());
+
+  if (!sym->name.empty())
+    ZyanStringAppendFormat(string, "%s", sym->name.c_str());
+  else
+    ZyanStringAppendFormat(string, "symbol_%u", sym->id);
 
   return ZYAN_STATUS_SUCCESS;
 }

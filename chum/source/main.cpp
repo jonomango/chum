@@ -2,7 +2,7 @@
 
 #include <chrono>
 
-void transform(chum::binary& bin) {
+void transform(chum::disassembled_binary& bin) {
   // Allocate a data block to hold a string.
   auto const hello_world_db = bin.create_data_block("Hello world!", 13);
   hello_world_db->read_only = true;
@@ -47,8 +47,8 @@ int main() {
 
   //auto bin = chum::disassemble("C:\\Users\\realj\\Desktop\\ntoskrnl (19041.1110).exe");
   //auto bin = chum::disassemble("C:\\Users\\realj\\Desktop\\dxgkrnl (lizerd).sys");
-  //auto bin = chum::disassemble("hello-world-x64.dll");
-  auto bin = chum::disassemble("hello-world-x64-min.dll");
+  auto bin = chum::disassemble("hello-world-x64.dll");
+  //auto bin = chum::disassemble("hello-world-x64-min.dll");
   //auto bin = chum::disassemble("split-block-1030.dll");
 
   auto const end_time = std::chrono::high_resolution_clock::now();

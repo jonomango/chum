@@ -31,6 +31,72 @@ symbol* disassembled_binary::rva_to_containing_symbol(std::uint32_t const rva) {
   return nullptr;
 }
 
+// Get the data block at the specified RVA.
+data_block* disassembled_binary::rva_to_db(
+    std::uint32_t const rva) const {
+  static auto const comp = 
+    [](rva_data_block_entry const& left, rva_data_block_entry const& right) {
+      return left.rva < right.rva;
+    };
+
+  // Find the first entry that is <= the specified RVA.
+  auto const it = std::lower_bound(begin(rva_data_block_map_),
+    end(rva_data_block_map_), rva_data_block_entry{ rva, nullptr }, comp);
+
+  if (it == end(rva_data_block_map_))
+    return nullptr;
+
+  if (rva != it->rva)
+    return nullptr;
+
+  return it->db;
+}
+
+// Get the data block that contains the specified RVA.
+data_block* disassembled_binary::rva_to_containing_db(
+    std::uint32_t const rva, std::uint32_t* const offset) const {
+  static auto const comp = 
+    [](rva_data_block_entry const& left, rva_data_block_entry const& right) {
+      return (left.rva + left.db->bytes.size()) < right.rva;
+    };
+
+  // Find the first entry that is <= the specified RVA.
+  auto const it = std::lower_bound(begin(rva_data_block_map_),
+    end(rva_data_block_map_), rva_data_block_entry{ rva, nullptr }, comp);
+
+  if (it == end(rva_data_block_map_))
+    return nullptr;
+
+  if (rva < it->rva || rva >= it->rva + it->db->bytes.size())
+    return nullptr;
+
+  // Calculate the offset from the start of the data block.
+  if (offset)
+    *offset = rva - it->rva;
+
+  return it->db;
+}
+
+// Insert the specified data block into the RVA to data block map.
+void disassembled_binary::insert_data_block_in_rva_map(
+    std::uint32_t const rva, data_block* const db) {
+  // 
+  // Code is mostly taken from https://stackoverflow.com/a/25524075.
+  // 
+
+  static auto const comp = 
+    [](rva_data_block_entry const& left, rva_data_block_entry const& right) {
+      return left.rva < right.rva;
+    };
+
+  rva_data_block_entry const entry = { rva, db };
+
+  // We want to insert the entry while still keeping the map sorted.
+  auto const it = std::upper_bound(
+    begin(rva_data_block_map_), end(rva_data_block_map_), entry, comp);
+  rva_data_block_map_.insert(it, entry);
+}
+
 // This is an internal structure that is used to produce a disassembled
 // binary. I don't really like how this is structured, but I couldn't find
 // a better solution.
@@ -91,6 +157,7 @@ public:
       // Create the data block.
       auto const db = bin.create_data_block(section.Misc.VirtualSize,
         nt_header_->OptionalHeader.SectionAlignment);
+      bin.insert_data_block_in_rva_map(section.VirtualAddress, db);
 
       // Zero-initialize the data block.
       std::memset(db->bytes.data(), 0, section.Misc.VirtualSize);
@@ -405,9 +472,23 @@ public:
             if (target_rva_entry.sym_id == null_symbol_id) {
               assert(target_rva_entry.blink == 0);
 
-              //Create the new symbol and add it to the RVA map.
-              target_rva_entry = rva_map_[target_rva] = {
-                bin.create_symbol(symbol_type::data)->id, 0 };
+              std::uint32_t offset = 0;
+              auto const db = bin.rva_to_containing_db(target_rva, &offset);
+
+              // If we cant find the containing data block, just use the null
+              // symbol. This can occur if the binary is referencing memory
+              // in the PE header, which we don't map.
+              auto sym = bin.get_symbol(null_symbol_id);
+
+              if (db) {
+                // Create the new symbol.
+                sym = bin.create_symbol(symbol_type::data);
+                sym->db = db;
+                sym->db_offset = offset;
+              }
+
+              // Add the symbol to the RVA map.
+              target_rva_entry = rva_map_[target_rva] = { sym->id, 0 };
             }
 
             // Modify the displacement bytes to point to a symbol ID instead.
@@ -491,6 +572,9 @@ public:
   // This function is just used to double check that nothing weird is going
   // on.
   bool verify() {
+    for (auto const& entry : bin.rva_data_block_map_)
+      std::printf("RVA: %X.\n", entry.rva);
+
     for (auto const& bb : bin.basic_blocks()) {
       // We are not allowed to have empty basic blocks.
       if (bb->instructions.empty())

@@ -221,14 +221,14 @@ symbol* binary::create_symbol(symbol_type const type, char const* const name) {
 }
 
 // Get a symbol from its ID.
-symbol* binary::get_symbol(symbol_id const sym_id) {
+symbol* binary::get_symbol(symbol_id const sym_id) const {
   if (sym_id >= symbols_.size())
     return nullptr;
   return symbols_[sym_id];
 }
 
 // Get every symbol.
-std::vector<symbol*>& binary::symbols() {
+std::vector<symbol*> const& binary::symbols() const {
   return symbols_;
 }
 
@@ -257,7 +257,7 @@ data_block* binary::create_data_block(void const* const data,
 }
 
 // Get every data block.
-std::vector<data_block*> binary::data_blocks() {
+std::vector<data_block*> const& binary::data_blocks() const {
   return data_blocks_;
 }
 
@@ -287,7 +287,7 @@ basic_block* binary::create_basic_block(char const* const name) {
 }
 
 // Get every basic block.
-std::vector<basic_block*> binary::basic_blocks() {
+std::vector<basic_block*> const& binary::basic_blocks() const {
   return basic_blocks_;
 }
 
@@ -299,7 +299,7 @@ import_module* binary::create_import_module(char const* const name) {
 
 // Get an import routine.
 import_routine* binary::get_import_routine(
-    char const* const module_name, char const* const routine_name) {
+    char const* const module_name, char const* const routine_name) const {
   // Search for the matching import module.
   for (auto const mod : import_modules_) {
     if (_stricmp(mod->name(), module_name) != 0)

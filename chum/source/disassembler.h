@@ -31,13 +31,22 @@ class disassembled_binary : public binary {
   friend class disassembler;
 public:
   // Get the symbol that an RVA points to.
-  symbol* rva_to_symbol(std::uint32_t rva);
+  symbol* rva_to_symbol(std::uint32_t rva) const;
 
   // Get the data block at the specified RVA.
   data_block* rva_to_db(std::uint32_t rva) const;
 
   // Get the data block that contains the specified RVA.
-  data_block* rva_to_containing_db(std::uint32_t rva, std::uint32_t* offset = nullptr) const;
+  data_block* rva_to_containing_db(std::uint32_t rva,
+    std::uint32_t* offset = nullptr) const;
+
+  // Get the basic block at the specified RVA.
+  basic_block* rva_to_bb(std::uint32_t rva) const;
+
+  // Get the basic block at the specified RVA, which includes any addresses
+  // that point to an instruction in the basic block.
+  basic_block* rva_to_containing_bb(std::uint32_t rva,
+    std::uint32_t* offset = nullptr) const;
 
 private:
   // Insert the specified data block into the RVA to data block map.

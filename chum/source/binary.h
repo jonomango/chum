@@ -37,10 +37,10 @@ public:
   symbol* create_symbol(symbol_type type, char const* name = nullptr);
 
   // Get a symbol from its ID.
-  symbol* get_symbol(symbol_id sym_id);
+  symbol* get_symbol(symbol_id sym_id) const;
 
   // Get every symbol.
-  std::vector<symbol*>& symbols();
+  std::vector<symbol*> const& symbols() const;
 
   // Create a zero-initialized data block of the specified size and alignment.
   data_block* create_data_block(
@@ -51,7 +51,7 @@ public:
     std::uint32_t size, std::uint32_t alignment = 1);
 
   // Get every data block.
-  std::vector<data_block*> data_blocks();
+  std::vector<data_block*> const& data_blocks() const;
 
   // Create a new basic block for the specific code symbol. This block
   // contains zero instructions upon creation. This function also updates
@@ -63,14 +63,14 @@ public:
   basic_block* create_basic_block(char const* name = nullptr);
 
   // Get every basic block.
-  std::vector<basic_block*> basic_blocks();
+  std::vector<basic_block*> const& basic_blocks() const;
 
   // Create an empty import module.
   import_module* create_import_module(char const* name);
 
   // Get an import routine.
   import_routine* get_import_routine(
-    char const* module_name, char const* routine_name);
+    char const* module_name, char const* routine_name) const;
 
   // Get an import routine. If the routine could not be found, create the
   // routine.

@@ -65,8 +65,6 @@ int main() {
 
   std::printf("[+] Disassembled binary.\n");
 
-  transform(*bin);
-
   bin->print(true);
 }
 

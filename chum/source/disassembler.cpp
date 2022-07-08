@@ -9,7 +9,7 @@
 namespace chum {
 
 // Get the symbol that an RVA points to.
-symbol* disassembled_binary::rva_to_symbol(std::uint32_t const rva) {
+symbol* disassembled_binary::rva_to_symbol(std::uint32_t const rva) const {
   if (rva >= rva_map_.size())
     return nullptr;
 
@@ -56,6 +56,61 @@ data_block* disassembled_binary::rva_to_containing_db(
     *offset = rva - it->rva;
 
   return it->db;
+}
+
+// Get the basic block at the specified RVA.
+basic_block* disassembled_binary::rva_to_bb(std::uint32_t const rva) const {
+  std::uint32_t offset = 0;
+  auto const bb = rva_to_containing_bb(rva, &offset);
+
+  if (!bb || offset != 0)
+    return nullptr;
+
+  return bb;
+}
+
+// Get the basic block at the specified RVA, which includes any addresses
+// that point to an instruction in the basic block.
+basic_block* disassembled_binary::rva_to_containing_bb(
+    std::uint32_t const rva, std::uint32_t* const offset) const {
+  if (rva >= rva_map_.size())
+    return nullptr;
+
+  auto const& entry = rva_map_[rva];
+
+  // This RVA entry points to a symbol.
+  if (entry.blink == 0) {
+    auto const sym = get_symbol(entry.sym_id);
+    if (!sym || sym->type != symbol_type::code)
+      return nullptr;
+
+    return sym->bb;
+  }
+
+  std::uint32_t count = 0;
+
+  // Keep walking backwards through the linked list until we reach the root
+  // symbol.
+  for (auto curr_rva = rva; true;) {
+    auto const& node = rva_map_[curr_rva];
+
+    // We reached the root symbol.
+    if (node.blink == 0) {
+      auto const sym = get_symbol(node.sym_id);
+      if (sym->type != symbol_type::code)
+        return nullptr;
+
+      if (offset)
+        *offset = count;
+
+      return sym->bb;
+    }
+
+    ++count;
+    curr_rva -= node.blink;
+  }
+
+  return nullptr;
 }
 
 // Insert the specified data block into the RVA to data block map.

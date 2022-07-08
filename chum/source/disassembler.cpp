@@ -8,48 +8,29 @@
 
 namespace chum {
 
-// This contains information about an RVA.
-struct rva_map_entry {
-  // If the blink is 0, this is the symbol that this RVA lands in.
-  symbol_id sym_id = null_symbol_id;
-
-  // If nonzero, this is the number of bytes to the previous RVA entry.
-  std::uint32_t blink = 0;
-};
-
 // Get the symbol that an RVA points to.
 symbol* disassembled_binary::rva_to_symbol(std::uint32_t const rva) {
-  assert(false);
-  return nullptr;
-}
+  if (rva >= rva_map_.size())
+    return nullptr;
 
-// Get the closest symbol that contains the specified RVA. For example,
-// if the specified RVA lands inside of a basic block, then the basic
-// block's symbol would be returned.
-symbol* disassembled_binary::rva_to_containing_symbol(std::uint32_t const rva) {
-  assert(false);
-  return nullptr;
+  auto const& entry = rva_map_[rva];
+
+  // This RVA points to an instruction inside of a basic block, not a symbol.
+  if (entry.blink != 0)
+    return nullptr;
+
+  return get_symbol(entry.sym_id);
 }
 
 // Get the data block at the specified RVA.
-data_block* disassembled_binary::rva_to_db(
-    std::uint32_t const rva) const {
-  static auto const comp = 
-    [](rva_data_block_entry const& left, rva_data_block_entry const& right) {
-      return left.rva < right.rva;
-    };
+data_block* disassembled_binary::rva_to_db( std::uint32_t const rva) const {
+  std::uint32_t offset = 0;
+  auto const db = rva_to_containing_db(rva, &offset);
 
-  // Find the first entry that is <= the specified RVA.
-  auto const it = std::lower_bound(begin(rva_data_block_map_),
-    end(rva_data_block_map_), rva_data_block_entry{ rva, nullptr }, comp);
-
-  if (it == end(rva_data_block_map_))
+  if (!db || offset != 0)
     return nullptr;
 
-  if (rva != it->rva)
-    return nullptr;
-
-  return it->db;
+  return db;
 }
 
 // Get the data block that contains the specified RVA.
@@ -133,7 +114,7 @@ public:
     sections_ = reinterpret_cast<PIMAGE_SECTION_HEADER>(nt_header_ + 1);
 
     // Allocate the RVA to symbol table so that any RVA can be used as an index.
-    rva_map_ = std::vector<rva_map_entry>(
+    bin.rva_map_ = std::vector<rva_map_entry>(
       nt_header_->OptionalHeader.SizeOfImage, rva_map_entry{});
 
     // Add the entrypoint to the disassembly queue.
@@ -210,8 +191,8 @@ public:
         auto const routine = imp_mod->create_routine(import_by_name->Name);
 
         // Point this RVA to its import symbol.
-        assert(rva_map_[first_thunk_rva].sym_id == null_symbol_id);
-        rva_map_[first_thunk_rva] = { routine->sym_id, 0 };
+        assert(bin.rva_map_[first_thunk_rva].sym_id == null_symbol_id);
+        bin.rva_map_[first_thunk_rva] = { routine->sym_id, 0 };
       }
     }
   }
@@ -241,7 +222,7 @@ public:
 
       // This can occur when a DLL exports the same function by multiple
       // names.
-      if (rva_map_[rva].sym_id != null_symbol_id)
+      if (bin.rva_map_[rva].sym_id != null_symbol_id)
         continue;
 
       // Forwarders point to a null-terminated name, rather than code/data.
@@ -263,7 +244,7 @@ public:
 
         // Create a new data symbol.
         auto const sym = bin.create_symbol(symbol_type::data);
-        rva_map_[rva] = { sym->id, 0 };
+        bin.rva_map_[rva] = { sym->id, 0 };
       }
     }
 
@@ -275,7 +256,7 @@ public:
         &file_buffer_[rva_to_file_offset(names[i])]);
 
       // Get the symbol for this export.
-      auto const sym = bin.get_symbol(rva_map_[rva].sym_id);
+      auto const sym = bin.get_symbol(bin.rva_map_[rva].sym_id);
       assert(sym->id != null_symbol_id);
 
       sym->name = name;
@@ -308,7 +289,7 @@ public:
         continue;
 
       // Add the start address of the RUNTIME_FUNCTION to the disassembly queue.
-      if (rva_map_[func.BeginAddress].sym_id == null_symbol_id)
+      if (bin.rva_map_[func.BeginAddress].sym_id == null_symbol_id)
         enqueue_rva(func.BeginAddress);
     }
   }
@@ -325,7 +306,7 @@ public:
       // Calculate the number of instructions that should remain in
       // the original basic block by following the linked list backwards.
       for (auto curr_rva = rva; true; ++count) {
-        auto const& entry = rva_map_[curr_rva];
+        auto const& entry = bin.rva_map_[curr_rva];
 
         // Keep walking until we reach the root.
         if (entry.blink != 0) {
@@ -333,13 +314,9 @@ public:
           continue;
         }
 
-        original_bb = bin.get_symbol(rva_map_[curr_rva].sym_id)->bb;
+        original_bb = bin.get_symbol(bin.rva_map_[curr_rva].sym_id)->bb;
         break;
       }
-
-      // Auto-generate a name for this symbol.
-      //char generated_sym_name[32] = { 0 };
-      //sprintf_s(generated_sym_name, "loc_%X", rva);
 
       //auto const new_bb = bin.create_basic_block(generated_sym_name);
       auto const new_bb = bin.create_basic_block();
@@ -356,7 +333,7 @@ public:
         begin(original_bb->instructions) + count,
         end(original_bb->instructions));
 
-      return rva_map_[rva] = { new_bb->sym_id, 0 };
+      return bin.rva_map_[rva] = { new_bb->sym_id, 0 };
     };
 
     while (!disassembly_queue_.empty()) {
@@ -374,8 +351,8 @@ public:
       auto const file_end = file_start + section->SizeOfRawData;
 
       // This is the basic block that we're constructing.
-      assert(bin.get_symbol(rva_map_[rva_start].sym_id)->type == symbol_type::code);
-      auto curr_bb = bin.get_symbol(rva_map_[rva_start].sym_id)->bb;
+      assert(bin.get_symbol(bin.rva_map_[rva_start].sym_id)->type == symbol_type::code);
+      auto curr_bb = bin.get_symbol(bin.rva_map_[rva_start].sym_id)->bb;
 
       // Keep decoding until we hit a terminating instruction.
       for (std::uint32_t instr_offset = 0;
@@ -418,7 +395,7 @@ public:
               instr_offset + decoded_instr.length + decoded_instr.raw.imm[0].value.s);
 
             // Get the RVA entry for the branch destination.
-            auto target_rva_entry = rva_map_[target_rva];
+            auto target_rva_entry = bin.rva_map_[target_rva];
 
             // We jumped into the middle of a basic block.
             if (target_rva_entry.blink != 0) {
@@ -465,7 +442,7 @@ public:
               instr_offset + decoded_instr.length + decoded_instr.raw.disp.value);
 
             // Get the RVA entry for this memory reference.
-            auto target_rva_entry = rva_map_[target_rva];
+            auto target_rva_entry = bin.rva_map_[target_rva];
 
             // This is the first reference to this address. Create a new symbol
             // for it.
@@ -488,7 +465,7 @@ public:
               }
 
               // Add the symbol to the RVA map.
-              target_rva_entry = rva_map_[target_rva] = { sym->id, 0 };
+              target_rva_entry = bin.rva_map_[target_rva] = { sym->id, 0 };
             }
 
             // Modify the displacement bytes to point to a symbol ID instead.
@@ -516,7 +493,7 @@ public:
             auto const fallthrough_rva = static_cast<std::uint32_t>(rva_start +
               instr_offset + decoded_instr.length);
 
-            if (auto rva_entry = rva_map_[fallthrough_rva];
+            if (auto rva_entry = bin.rva_map_[fallthrough_rva];
                 rva_entry.sym_id != null_symbol_id) {
               // It *might* be possible to fallthrough into the middle of
               // an already existing basic block if the binary jumps into
@@ -541,7 +518,7 @@ public:
         instr_offset += instr.length;
 
         // If we've entered into another basic block, end the current block.
-        if (auto rva_entry = rva_map_[rva_start + instr_offset];
+        if (auto rva_entry = bin.rva_map_[rva_start + instr_offset];
             rva_entry.sym_id != null_symbol_id) {
           auto const sym = bin.get_symbol(rva_entry.sym_id);
 
@@ -561,8 +538,8 @@ public:
         }
 
         // Create an RVA entry for the next instruction.
-        rva_map_[rva_start + instr_offset] = {
-          curr_bb->sym_id, decoded_instr.length };
+        bin.rva_map_[rva_start + instr_offset] = {
+          0, decoded_instr.length };
       }
     }
 
@@ -572,9 +549,6 @@ public:
   // This function is just used to double check that nothing weird is going
   // on.
   bool verify() {
-    for (auto const& entry : bin.rva_data_block_map_)
-      std::printf("RVA: %X.\n", entry.rva);
-
     for (auto const& bb : bin.basic_blocks()) {
       // We are not allowed to have empty basic blocks.
       if (bb->instructions.empty())
@@ -585,8 +559,8 @@ public:
     std::size_t bb_count = 0;
     std::size_t sym_count = 0;
 
-    for (std::uint32_t rva = 0; rva < rva_map_.size(); ++rva) {
-      auto const& entry = rva_map_[rva];
+    for (std::uint32_t rva = 0; rva < bin.rva_map_.size(); ++rva) {
+      auto const& entry = bin.rva_map_[rva];
 
       // There is nothing at this RVA.
       if (entry.blink == 0 && entry.sym_id == null_symbol_id)
@@ -594,6 +568,11 @@ public:
 
       // This is an instruction entry.
       if (entry.blink != 0) {
+        if (entry.sym_id != null_symbol_id) {
+          __debugbreak();
+          return false;
+        }
+
         std::size_t instr_count = 0;
 
         // Count the number of instructions from the current RVA to the root
@@ -602,11 +581,11 @@ public:
           ++instr_count;
 
           // We reached the root basic block.
-          if (rva_map_[curr_rva].blink == 0) {
-            if (rva_map_[curr_rva].sym_id == null_symbol_id)
+          if (bin.rva_map_[curr_rva].blink == 0) {
+            if (bin.rva_map_[curr_rva].sym_id == null_symbol_id)
               return false;
 
-            auto const root = bin.get_symbol(rva_map_[curr_rva].sym_id);
+            auto const root = bin.get_symbol(bin.rva_map_[curr_rva].sym_id);
             if (!root)
               return false;
 
@@ -619,7 +598,7 @@ public:
             break;
           }
 
-          curr_rva -= rva_map_[curr_rva].blink;
+          curr_rva -= bin.rva_map_[curr_rva].blink;
         }
 
         continue;
@@ -689,9 +668,9 @@ private:
     disassembly_queue_.push(rva);
 
     // Make sure we're not creating a duplicate symbol.
-    assert(rva_map_[rva].sym_id == null_symbol_id);
+    assert(bin.rva_map_[rva].sym_id == null_symbol_id);
 
-    return rva_map_[rva] = { bin.create_basic_block(name)->sym_id, 0 };
+    return bin.rva_map_[rva] = { bin.create_basic_block(name)->sym_id, 0 };
   }
 
   // Add an RVA to the disassembly queue. This function will create a basic
@@ -710,7 +689,7 @@ private:
     // Create a new basic block.
     bin.create_basic_block(sym_id);
 
-    return rva_map_[rva] = { sym_id, 0 };
+    return bin.rva_map_[rva] = { sym_id, 0 };
   }
 
 private:
@@ -718,9 +697,6 @@ private:
 
   // The raw file contents.
   std::vector<std::uint8_t> file_buffer_ = {};
-
-  // A map that contains RVAs and their metadata.
-  std::vector<rva_map_entry> rva_map_ = {};
 
   // A queue of code RVAs to disassemble from.
   std::queue<std::uint32_t> disassembly_queue_ = {};

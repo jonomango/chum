@@ -8,7 +8,8 @@ void transform(chum::disassembled_binary& bin) {
   hello_world_db->read_only = true;
 
   // Create a symbol to the string.
-  auto const hello_world_sym = bin.create_symbol(chum::symbol_type::data);
+  auto const hello_world_sym = bin.create_symbol(
+    chum::symbol_type::data, "hello_world_str");
   hello_world_sym->db = hello_world_db;
   hello_world_sym->db_offset = 0;
 
@@ -47,8 +48,8 @@ int main() {
 
   //auto bin = chum::disassemble("C:\\Users\\realj\\Desktop\\ntoskrnl (19041.1110).exe");
   //auto bin = chum::disassemble("C:\\Users\\realj\\Desktop\\dxgkrnl (lizerd).sys");
-  auto bin = chum::disassemble("hello-world-x64.dll");
-  //auto bin = chum::disassemble("hello-world-x64-min.dll");
+  //auto bin = chum::disassemble("hello-world-x64.dll");
+  auto bin = chum::disassemble("hello-world-x64-min.dll");
   //auto bin = chum::disassemble("split-block-1030.dll");
 
   auto const end_time = std::chrono::high_resolution_clock::now();

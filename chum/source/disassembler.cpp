@@ -534,6 +534,37 @@ public:
 
               // Add the symbol to the RVA map.
               target_rva_entry = bin.rva_map_[target_rva] = { sym->id, 0 };
+
+              // Check to see whether this is a potential function pointer.
+              if (db && db->read_only && decoded_instr.operand_width == 64) {
+                // TODO: Check for out-of-bounds.
+                std::uint64_t value = 0;
+                std::memcpy(&value, &file_buffer_[rva_to_file_offset(target_rva)], 8);
+
+                if (value >= nt_header_->OptionalHeader.ImageBase &&
+                    value < nt_header_->OptionalHeader.ImageBase + nt_header_->OptionalHeader.SizeOfImage) {
+                  auto const rva = static_cast<std::uint32_t>(
+                    value - nt_header_->OptionalHeader.ImageBase);
+
+                  if (rva_in_exec_section(rva)) {
+                    assert(rva % 8 == 0);
+                    auto rva_entry = bin.rva_map_[rva];
+
+                    // We jumped into the middle of a basic block.
+                    if (rva_entry.blink != 0) {
+                      rva_entry = split_block(rva);
+
+                      // This happens if we need to split the current block that
+                      // we're currently building.
+                      if (rva >= rva_start && rva < rva_start + instr_offset)
+                        curr_bb = bin.get_symbol(rva_entry.sym_id)->bb;
+                    }
+                    // This is undiscovered code, add it to the disassembly queue.
+                    else if (rva_entry.sym_id == null_symbol_id)
+                      enqueue_rva(rva);
+                  }
+                }
+              }
             }
 
             // Modify the displacement bytes to point to a symbol ID instead.

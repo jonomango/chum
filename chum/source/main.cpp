@@ -46,8 +46,8 @@ void transform(chum::disassembled_binary& bin) {
 int main() {
   auto const start_time = std::chrono::high_resolution_clock::now();
 
-  //auto bin = chum::disassemble("C:\\Users\\realj\\Desktop\\ntoskrnl (19041.1110).exe");
   //auto bin = chum::disassemble("C:\\Users\\realj\\Desktop\\dxgkrnl (lizerd).sys");
+  //auto bin = chum::disassemble("C:\\Users\\realj\\Desktop\\kernel32.dll");
   auto bin = chum::disassemble("hello-world-x64.dll");
   //auto bin = chum::disassemble("hello-world-x64-min.dll");
   //auto bin = chum::disassemble("split-block-1030.dll");

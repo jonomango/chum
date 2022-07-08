@@ -33,6 +33,12 @@ public:
   // Print the contents of this binary, for debugging purposes.
   void print(bool verbose = false);
 
+  // Get the entrypoint of this binary, if it exists.
+  basic_block* entrypoint() const;
+
+  // Set the entrypoint of this binary.
+  void entrypoint(basic_block* bb);
+
   // Create a new symbol that is assigned a unique symbol ID.
   symbol* create_symbol(symbol_type type, char const* name = nullptr);
 
@@ -78,8 +84,15 @@ public:
     char const* module_name, char const* routine_name);
 
 private:
+  // ---------------
+  // Remember to add any new members to the move constructor/assignment operator!
+  // ---------------
+
   ZydisDecoder decoder_ = {};
   ZydisFormatter formatter_ = {};
+
+  // This is an optional pointer to the entrypoint of this binary.
+  basic_block* entrypoint_ = nullptr;
 
   // Most of these containers need to store pointers to the contained
   // structures since they require stability. We dont want to invalidate

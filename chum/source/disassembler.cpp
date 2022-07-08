@@ -173,8 +173,11 @@ public:
       nt_header_->OptionalHeader.SizeOfImage, rva_map_entry{});
 
     // Add the entrypoint to the disassembly queue.
-    if (nt_header_->OptionalHeader.AddressOfEntryPoint)
-      enqueue_rva(nt_header_->OptionalHeader.AddressOfEntryPoint, "<entrypoint>");
+    if (nt_header_->OptionalHeader.AddressOfEntryPoint) {
+      auto const entry = enqueue_rva(
+        nt_header_->OptionalHeader.AddressOfEntryPoint, "<entrypoint>");
+      bin.entrypoint(bin.get_symbol(entry.sym_id)->bb);
+    }
 
     return true;
   }

@@ -2,7 +2,7 @@
 
 #include <chrono>
 
-void transform(chum::disassembled_binary& bin) {
+void transform(chum::binary& bin) {
   // Allocate a data block to hold a string.
   auto const hello_world_db = bin.create_data_block("Hello world!", 13);
   hello_world_db->read_only = true;
@@ -32,15 +32,13 @@ void transform(chum::disassembled_binary& bin) {
     0xC3
   } });
 
-  for (auto& bb : bin.basic_blocks()) {
-    // Dont instrument the instrumentation block...
-    if (bb == ibb)
-      continue;
+  auto const entrypoint = bin.entrypoint();
+  if (!entrypoint)
+    return;
 
-    // Insert a CALL to our instrumentation function.
-    bb->instructions.insert(begin(bb->instructions),
-      chum::instruction::call(ibb));
-  }
+  // Insert a CALL to our instrumentation function.
+  entrypoint->instructions.insert(begin(entrypoint->instructions),
+    chum::instruction::call(ibb));
 }
 
 int main() {
@@ -48,8 +46,8 @@ int main() {
 
   //auto bin = chum::disassemble("C:\\Users\\realj\\Desktop\\dxgkrnl (lizerd).sys");
   //auto bin = chum::disassemble("C:\\Users\\realj\\Desktop\\kernel32.dll");
-  auto bin = chum::disassemble("hello-world-x64.dll");
-  //auto bin = chum::disassemble("hello-world-x64-min.dll");
+  //auto bin = chum::disassemble("hello-world-x64.dll");
+  auto bin = chum::disassemble("hello-world-x64-min.dll");
   //auto bin = chum::disassemble("split-block-1030.dll");
 
   auto const end_time = std::chrono::high_resolution_clock::now();
@@ -65,6 +63,8 @@ int main() {
 
   std::printf("[+] Disassembled binary.\n");
 
-  bin->print();
+  transform(*bin);
+
+  bin->print(true);
 }
 

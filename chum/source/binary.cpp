@@ -105,6 +105,7 @@ binary::binary(binary&& other) {
   // I *think* this is correct...
   std::swap(decoder_,        other.decoder_);
   std::swap(formatter_,      other.formatter_);
+  std::swap(entrypoint_,     other.entrypoint_);
   std::swap(symbols_,        other.symbols_);
   std::swap(data_blocks_,    other.data_blocks_);
   std::swap(basic_blocks_,   other.basic_blocks_);
@@ -116,6 +117,7 @@ binary& binary::operator=(binary&& other) {
   // I *think* this is correct...
   std::swap(decoder_,        other.decoder_);
   std::swap(formatter_,      other.formatter_);
+  std::swap(entrypoint_,     other.entrypoint_);
   std::swap(symbols_,        other.symbols_);
   std::swap(data_blocks_,    other.data_blocks_);
   std::swap(basic_blocks_,   other.basic_blocks_);
@@ -209,6 +211,16 @@ void binary::print(bool const verbose) {
       std::printf("[+]\n");
     }
   }
+}
+
+// Get the entrypoint of this binary, if it exists.
+basic_block* binary::entrypoint() const {
+  return entrypoint_;
+}
+
+// Set the entrypoint of this binary.
+void binary::entrypoint(basic_block* const bb) {
+  entrypoint_ = bb;
 }
 
 // Create a new symbol that is assigned a unique symbol ID.

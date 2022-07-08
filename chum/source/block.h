@@ -29,6 +29,12 @@ struct basic_block {
   // The instructions that make up this block. The last instruction is a
   // terminating instruction.
   std::vector<instruction> instructions = {};
+
+  // Insert an instruction into the basic block.
+  void insert(instruction const& instr, std::size_t pos = 0);
+
+  // Push an instruction to the back of the basic block.
+  void push(instruction const& instr);
 };
 
 // A data block is a contiguous blob of data.

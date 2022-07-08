@@ -19,26 +19,20 @@ void transform(chum::binary& bin) {
 
   // Create a basic block that opens a message box.
   auto const ibb = bin.create_basic_block("instrumentation_block");
+
   // xor rcx, rcx
-  ibb->instructions.push_back({ 3, {
-    0x48, 0x31, 0xC9
-  } });
+  ibb->push({ 3, { 0x48, 0x31, 0xC9 } });
   // lea rdx, hello_world
-  ibb->instructions.push_back({ 7, {
-    0x48, 0x8D, 0x15, 0x00, 0x00, 0x00, 0x00
-  } });
+  ibb->push({ 7, { 0x48, 0x8D, 0x15, 0x00, 0x00, 0x00, 0x00 } });
   // ret
-  ibb->instructions.push_back({ 1, {
-    0xC3
-  } });
+  ibb->push({ 1, { 0xC3 } });
 
   auto const entrypoint = bin.entrypoint();
   if (!entrypoint)
     return;
 
   // Insert a CALL to our instrumentation function.
-  entrypoint->instructions.insert(begin(entrypoint->instructions),
-    chum::instruction::call(ibb));
+  entrypoint->insert(chum::instruction::call(ibb));
 }
 
 int main() {

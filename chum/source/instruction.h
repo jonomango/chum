@@ -16,7 +16,7 @@ struct instruction {
   std::uint8_t bytes[15] = {};
 
   // Create a CALL instruction to the specified basic block.
-  static instruction call(struct basic_block* bb);
+  static instruction call(struct basic_block const* bb);
 };
 
 } // namespace chum

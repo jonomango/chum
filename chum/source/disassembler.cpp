@@ -456,9 +456,8 @@ public:
             if (target_rva_entry.blink != 0) {
               target_rva_entry = split_block(target_rva);
 
-              // TODO: Should this be <= ?
               // This happens if we need to split the current block that
-              // we're building.
+              // we're currently building.
               if (target_rva >= rva_start && target_rva < rva_start + instr_offset)
                 curr_bb = bin.get_symbol(target_rva_entry.sym_id)->bb;
             }
@@ -499,11 +498,25 @@ public:
             // Get the RVA entry for this memory reference.
             auto target_rva_entry = bin.rva_map_[target_rva];
 
-            // This is the first reference to this address. Create a new symbol
-            // for it.
-            if (target_rva_entry.sym_id == null_symbol_id) {
-              assert(target_rva_entry.blink == 0);
+            // We're accessing an instruction in the middle of a basic block.
+            if (target_rva_entry.blink != 0) {
+              target_rva_entry = split_block(target_rva);
 
+              // This happens if we need to split the current block that
+              // we're currently building.
+              if (target_rva >= rva_start && target_rva < rva_start + instr_offset)
+                curr_bb = bin.get_symbol(target_rva_entry.sym_id)->bb;
+            }
+
+            // LEA instructions are often used for accessing code, not just data.
+            if (decoded_instr.mnemonic == ZYDIS_MNEMONIC_LEA &&
+                target_rva_entry.sym_id == null_symbol_id &&
+                rva_in_exec_section(target_rva))
+              target_rva_entry = enqueue_rva(target_rva);
+
+            // This is the first reference to this address. Assume that it
+            // is a data access, and create a new symbol for it.
+            if (target_rva_entry.sym_id == null_symbol_id) {
               std::uint32_t offset = 0;
               auto const db = bin.rva_to_containing_db(target_rva, &offset);
 

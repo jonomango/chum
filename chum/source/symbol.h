@@ -31,10 +31,16 @@ inline constexpr char const* serialize_symbol_type(symbol_type const type) {
 
 // A symbol ID is essentially a handle to a symbol that can be used to
 // quickly lookup the associated symbol.
-using symbol_id = std::uint32_t;
+struct symbol_id {
+  std::uint32_t value = 0;
+
+  explicit operator bool() const { return value != 0; }
+  bool operator==(symbol_id const& other) const { return value == other.value; }
+  bool operator!=(symbol_id const& other) const { return value != other.value; }
+};
 
 // This symbol will NEVER point to meaningful data.
-inline constexpr symbol_id null_symbol_id = 0;
+inline constexpr symbol_id null_symbol_id = { 0 };
 
 // A symbol represents a memory address that is not known until link-time.
 // TODO: support exporting symbols.

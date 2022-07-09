@@ -474,7 +474,7 @@ public:
 
             // If we can fit the symbol ID in the original instruction, do that
             // instead of re-encoding.
-            if (target_rva_entry.sym_id < (1ull << decoded_instr.raw.imm[0].size)) {
+            if (target_rva_entry.sym_id.value < (1ull << decoded_instr.raw.imm[0].size)) {
               // Modify the displacement bytes to point to a symbol ID instead.
               assert(decoded_instr.raw.imm[0].size <= 32);
               std::memcpy(instr.bytes + decoded_instr.raw.imm[0].offset,

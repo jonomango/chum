@@ -83,6 +83,13 @@ public:
   import_routine* get_or_create_import_routine(
     char const* module_name, char const* routine_name);
 
+public:
+  // Create a new instruction.
+  template <typename... Args>
+  instruction instr(Args&&... args) const {
+    return instruction{ 1, { 0xCC } };
+  }
+
 private:
   // ---------------
   // Remember to add any new members to the move constructor/assignment operator!

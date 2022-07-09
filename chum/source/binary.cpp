@@ -133,7 +133,7 @@ void binary::print(bool const verbose) {
   if (verbose) {
     for (auto const sym : symbols_) {
       std::printf("[+]   ID: %-6u Type: %-8s",
-        sym->id, serialize_symbol_type(sym->type));
+        sym->id.value, serialize_symbol_type(sym->type));
 
       // Print the name, if it exists.
       if (!sym->name.empty())
@@ -175,11 +175,11 @@ void binary::print(bool const verbose) {
       auto const bb = basic_blocks_[i];
 
       std::printf("[+]   #%-4zd Symbol: %-6u Instruction count: %-4zu",
-        i, bb->sym_id, bb->instructions.size());
+        i, bb->sym_id.value, bb->instructions.size());
 
       // Print the fallthrough target symbol ID, if it exists.
       if (bb->fallthrough_target)
-        std::printf(" Fallthrough: %-6u\n", bb->fallthrough_target);
+        std::printf(" Fallthrough: %-6u\n", bb->fallthrough_target.value);
       else
         std::printf("\n");
 
@@ -226,7 +226,7 @@ void binary::entrypoint(basic_block* const bb) {
 // Create a new symbol that is assigned a unique symbol ID.
 symbol* binary::create_symbol(symbol_type const type, char const* const name) {
   auto const sym = symbols_.emplace_back(new symbol{});
-  sym->id        = static_cast<symbol_id>(symbols_.size() - 1);
+  sym->id        = symbol_id{ static_cast<std::uint32_t>(symbols_.size() - 1) };
   sym->type      = type;
   sym->name      = name ? name : "";
   return sym;
@@ -234,9 +234,9 @@ symbol* binary::create_symbol(symbol_type const type, char const* const name) {
 
 // Get a symbol from its ID.
 symbol* binary::get_symbol(symbol_id const sym_id) const {
-  if (sym_id >= symbols_.size())
+  if (sym_id.value >= symbols_.size())
     return nullptr;
-  return symbols_[sym_id];
+  return symbols_[sym_id.value];
 }
 
 // Get every symbol.
@@ -278,7 +278,7 @@ std::vector<data_block*> const& binary::data_blocks() const {
 // the specified symbol so that it points to the newly created block.
 basic_block* binary::create_basic_block(symbol_id const sym_id) {
   // Make sure we're dealing with a code symbol.
-  auto const sym = symbols_[sym_id];
+  auto const sym = symbols_[sym_id.value];
   assert(sym->type == symbol_type::code);
 
   sym->bb = basic_blocks_.emplace_back(new basic_block{});

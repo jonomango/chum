@@ -352,6 +352,76 @@ public:
     }
   }
 
+  // Parse the relocs directory in order to find any absolute addresses that
+  // may be hard to find (such as function pointers, etc).
+  void parse_relocs() {
+    auto const& reloc =
+      nt_header_->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_BASERELOC];
+
+    if (!reloc.VirtualAddress || reloc.Size <= 0)
+      return;
+
+    auto const initial_block_addr =
+      &file_buffer_[rva_to_file_offset(reloc.VirtualAddress)];
+
+    // Iterate over every relocation block.
+    for (auto block_addr = initial_block_addr;
+         block_addr < initial_block_addr + reloc.Size;) {
+      auto const block = reinterpret_cast<PIMAGE_BASE_RELOCATION>(block_addr);
+      block_addr += block->SizeOfBlock;
+
+      // https://docs.microsoft.com/en-us/windows/win32/debug/pe-format#the-reloc-section-image-only
+      struct base_reloc_entry {
+        std::uint16_t offset : 12;
+        std::uint16_t type   : 4;
+      };
+
+      // This is the number of relocations in this block.
+      auto const entry_count = (block->SizeOfBlock - sizeof(*block)) / 2;
+
+      // The entries are located right after the relocation block in memory.
+      auto const entries = reinterpret_cast<base_reloc_entry*>(block + 1);
+
+      for (std::size_t i = 0; i < entry_count; ++i) {
+        auto const& entry = entries[i];
+
+        // This is the RVA where the relocation is going to occur.
+        // TODO: Sanity check the reloc RVA.
+        auto const reloc_rva = block->VirtualAddress + entry.offset;
+
+        // This is used as padding and can be safely ignored.
+        if (entry.type == IMAGE_REL_BASED_ABSOLUTE)
+          continue;
+
+        assert(entry.type == IMAGE_REL_BASED_DIR64);
+
+        auto& rva_entry = bin.rva_map_[reloc_rva];
+
+        // Basic block creation should not have been executed yet...
+        assert(rva_entry.blink == 0);
+
+        // This symbol has already been discovered.
+        if (rva_entry.sym_id)
+          continue;
+
+        // TODO: Handle this when it comes up...
+        assert(!rva_in_exec_section(reloc_rva));
+
+        std::uint32_t db_offset = 0;
+        auto const db = bin.rva_to_containing_db(reloc_rva, &db_offset);
+
+        // This might happen if the RVA lands in the PE header... maybe.
+        if (!db)
+          continue;
+
+        auto const sym = bin.create_symbol(symbol_type::data, "RELOC");
+        sym->db = db;
+        sym->db_offset = db_offset;
+        rva_entry = { sym->id, 0 };
+      }
+    }
+  }
+
   // The main engine of the recursive disassembler. This tries to distinguish
   // code from data and form the basic blocks that compose this binary.
   bool disassemble() {
@@ -824,6 +894,7 @@ std::optional<disassembled_binary> disassemble(char const* const path) {
   dasm.parse_imports();
   dasm.parse_exports();
   dasm.parse_exceptions();
+  dasm.parse_relocs();
 
   if (!dasm.disassemble())
     return {};

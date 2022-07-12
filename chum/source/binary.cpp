@@ -240,6 +240,11 @@ symbol* binary::get_symbol(symbol_id const sym_id) const {
 }
 
 // Get every symbol.
+std::vector<symbol*>& binary::symbols() {
+  return symbols_;
+}
+
+// Get every symbol.
 std::vector<symbol*> const& binary::symbols() const {
   return symbols_;
 }
@@ -266,6 +271,11 @@ data_block* binary::create_data_block(void const* const data,
   db->alignment = alignment;
   db->read_only = false;
   return db;
+}
+
+// Get every data block.
+std::vector<data_block*>& binary::data_blocks() {
+  return data_blocks_;
 }
 
 // Get every data block.
@@ -296,6 +306,11 @@ basic_block* binary::create_basic_block(symbol_id const sym_id) {
 // to this block. This block contains zero instructions upon creation.
 basic_block* binary::create_basic_block(char const* const name) {
   return create_basic_block(create_symbol(symbol_type::code, name)->id);
+}
+
+// Get every basic block.
+std::vector<basic_block*>& binary::basic_blocks() {
+  return basic_blocks_;
 }
 
 // Get every basic block.

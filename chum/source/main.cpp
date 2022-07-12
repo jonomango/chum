@@ -39,10 +39,10 @@ void transform(chum::binary& bin) {
 int main() {
   auto const start_time = std::chrono::high_resolution_clock::now();
 
-  auto bin = chum::disassemble("C:\\Users\\realj\\Desktop\\dxgkrnl (lizerd).sys");
+  //auto bin = chum::disassemble("C:\\Users\\realj\\Desktop\\dxgkrnl (lizerd).sys");
   //auto bin = chum::disassemble("C:\\Users\\realj\\Desktop\\kernel32.dll");
   //auto bin = chum::disassemble("hello-world-x64.dll");
-  //auto bin = chum::disassemble("hello-world-x64-min.dll");
+  auto bin = chum::disassemble("hello-world-x64-min.dll");
   //auto bin = chum::disassemble("split-block-1030.dll");
 
   auto const end_time = std::chrono::high_resolution_clock::now();
@@ -58,9 +58,8 @@ int main() {
 
   std::printf("[+] Disassembled binary.\n");
 
-  std::printf("EP RVA: %X.\n", bin->symbol_to_rva(bin->entrypoint()->sym_id));
-  //transform(*bin);
+  transform(*bin);
 
-  bin->print();
+  bin->print(true);
 }
 

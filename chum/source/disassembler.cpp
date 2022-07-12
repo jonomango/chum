@@ -698,6 +698,17 @@ public:
     return true;
   }
 
+  // Sort the basic blocks by RVA, the same way that they're laid out in the
+  // original binary.
+  void sort_basic_blocks() {
+    auto& blocks = bin.basic_blocks();
+
+    std::sort(begin(blocks), end(blocks),
+      [&](auto const& left, auto const& right) {
+        return bin.symbol_to_rva(left->sym_id) < bin.symbol_to_rva(right->sym_id);
+      });
+  }
+
   // This function is just used to double check that nothing weird is going
   // on.
   bool verify() {
@@ -989,6 +1000,8 @@ std::optional<disassembled_binary> disassemble(char const* const path) {
 
   if (!dasm.disassemble())
     return {};
+
+  dasm.sort_basic_blocks();
 
   assert(dasm.verify());
 

@@ -23,7 +23,7 @@ symbol* disassembled_binary::rva_to_symbol(std::uint32_t const rva) const {
 }
 
 // Get the data block at the specified RVA.
-data_block* disassembled_binary::rva_to_db( std::uint32_t const rva) const {
+data_block* disassembled_binary::rva_to_db(std::uint32_t const rva) const {
   std::uint32_t offset = 0;
   auto const db = rva_to_containing_db(rva, &offset);
 
@@ -408,16 +408,27 @@ public:
         assert(!rva_in_exec_section(reloc_rva));
 
         std::uint32_t db_offset = 0;
-        auto const db = bin.rva_to_containing_db(reloc_rva, &db_offset);
+        auto db = bin.rva_to_containing_db(reloc_rva, &db_offset);
 
         // This might happen if the RVA lands in the PE header... maybe.
         if (!db)
           continue;
 
-        auto const sym = bin.create_symbol(symbol_type::data, "RELOC");
+        auto sym = bin.create_symbol(symbol_type::data);
         sym->db = db;
         sym->db_offset = db_offset;
         rva_entry = { sym->id, 0 };
+
+        // Keep analyzing the (possible) pointer chain.
+        while (true) {
+          auto const rva = analyze_data_symbol(sym);
+          if (!rva)
+            break;
+
+          sym = bin.get_symbol(bin.rva_map_[rva].sym_id);
+          if (sym->type != symbol_type::data)
+            break;
+        }
       }
     }
   }
@@ -425,45 +436,6 @@ public:
   // The main engine of the recursive disassembler. This tries to distinguish
   // code from data and form the basic blocks that compose this binary.
   bool disassemble() {
-    // Split the basic block at the specified RVA into two, and return the
-    // new RVA entry.
-    auto const split_block = [&](std::uint32_t const rva) {
-      std::size_t count        = 0;
-      basic_block* original_bb = nullptr;
-
-      // Calculate the number of instructions that should remain in
-      // the original basic block by following the linked list backwards.
-      for (auto curr_rva = rva; true; ++count) {
-        auto const& entry = bin.rva_map_[curr_rva];
-
-        // Keep walking until we reach the root.
-        if (entry.blink != 0) {
-          curr_rva -= entry.blink;
-          continue;
-        }
-
-        original_bb = bin.get_symbol(bin.rva_map_[curr_rva].sym_id)->bb;
-        break;
-      }
-
-      //auto const new_bb = bin.create_basic_block(generated_sym_name);
-      auto const new_bb = bin.create_basic_block();
-
-      // Steal the original block's fallthrough target.
-      new_bb->fallthrough_target = original_bb->fallthrough_target;
-      original_bb->fallthrough_target = new_bb->sym_id;
-
-      // Steal the tail end instructions from the original block.
-      new_bb->instructions.insert(begin(new_bb->instructions),
-        begin(original_bb->instructions) + count,
-        end(original_bb->instructions));
-      original_bb->instructions.erase(
-        begin(original_bb->instructions) + count,
-        end(original_bb->instructions));
-
-      return bin.rva_map_[rva] = { new_bb->sym_id, 0 };
-    };
-
     while (!disassembly_queue_.empty()) {
       // Pop an RVA from the front of the queue.
       auto const rva_start = disassembly_queue_.front();
@@ -529,7 +501,7 @@ public:
             if (target_rva_entry.blink != 0) {
               target_rva_entry = split_block(target_rva);
 
-              // This happens if we need to split the current block that
+              // This happens if we need to split the block that
               // we're currently building.
               if (target_rva >= rva_start && target_rva < rva_start + instr_offset)
                 curr_bb = bin.get_symbol(target_rva_entry.sym_id)->bb;
@@ -575,7 +547,7 @@ public:
             if (target_rva_entry.blink != 0) {
               target_rva_entry = split_block(target_rva);
 
-              // This happens if we need to split the current block that
+              // This happens if we need to split the block that
               // we're currently building.
               if (target_rva >= rva_start && target_rva < rva_start + instr_offset)
                 curr_bb = bin.get_symbol(target_rva_entry.sym_id)->bb;
@@ -608,34 +580,24 @@ public:
               // Add the symbol to the RVA map.
               target_rva_entry = bin.rva_map_[target_rva] = { sym->id, 0 };
 
-              // Check to see whether this is a potential function pointer.
-              if (db && db->read_only && decoded_instr.operand_width == 64) {
-                // TODO: Check for out-of-bounds.
-                std::uint64_t value = 0;
-                std::memcpy(&value, &file_buffer_[rva_to_file_offset(target_rva)], 8);
+              // Check to see whether this is a potential pointer.
+              if (db && decoded_instr.operand_width == 64 && target_rva % 8 == 0) {
+                // Keep analyzing the (possible) pointer chain.
+                while (true) {
+                  auto const rva = analyze_data_symbol(sym);
+                  if (!rva)
+                    break;
 
-                if (value >= nt_header_->OptionalHeader.ImageBase &&
-                    value < nt_header_->OptionalHeader.ImageBase + nt_header_->OptionalHeader.SizeOfImage) {
-                  auto const rva = static_cast<std::uint32_t>(
-                    value - nt_header_->OptionalHeader.ImageBase);
+                  sym = bin.get_symbol(bin.rva_map_[rva].sym_id);
 
-                  if (rva_in_exec_section(rva)) {
-                    assert(rva % 8 == 0);
-                    auto rva_entry = bin.rva_map_[rva];
+                  // This happens if we split the block that we are
+                  // currently building.
+                  if (rva >= rva_start && rva < rva_start + instr_offset)
+                    curr_bb = sym->bb;
 
-                    // We jumped into the middle of a basic block.
-                    if (rva_entry.blink != 0) {
-                      rva_entry = split_block(rva);
-
-                      // This happens if we need to split the current block that
-                      // we're currently building.
-                      if (rva >= rva_start && rva < rva_start + instr_offset)
-                        curr_bb = bin.get_symbol(rva_entry.sym_id)->bb;
-                    }
-                    // This is undiscovered code, add it to the disassembly queue.
-                    else if (rva_entry.sym_id == null_symbol_id)
-                      enqueue_rva(rva);
-                  }
+                  // We reached a dead end in the pointer chain.
+                  if (sym->type != symbol_type::data)
+                    break;
                 }
               }
             }
@@ -655,11 +617,11 @@ public:
         curr_bb->instructions.push_back(instr);
 
         // If this is a terminating instruction, end the block.
-        if (decoded_instr.meta.category == ZYDIS_CATEGORY_RET ||
-            decoded_instr.meta.category == ZYDIS_CATEGORY_COND_BR ||
+        if (decoded_instr.meta.category == ZYDIS_CATEGORY_RET       ||
+            decoded_instr.meta.category == ZYDIS_CATEGORY_COND_BR   ||
             decoded_instr.meta.category == ZYDIS_CATEGORY_UNCOND_BR ||
-            (decoded_instr.meta.category == ZYDIS_CATEGORY_INTERRUPT &&
-             decoded_instr.raw.imm[0].value.s == 0x29)) {
+           (decoded_instr.meta.category == ZYDIS_CATEGORY_INTERRUPT &&
+            decoded_instr.raw.imm[0].value.s == 0x29)) {
           // Conditional branches require a fallthrough target.
           if (decoded_instr.meta.category == ZYDIS_CATEGORY_COND_BR) {
             auto const fallthrough_rva = static_cast<std::uint32_t>(rva_start +
@@ -802,7 +764,7 @@ public:
 private:
   // Convert an RVA to its corresponding file offset by iterating over every
   // PE section and translating accordingly.
-  std::uint32_t rva_to_file_offset(std::uint32_t const rva) {
+  std::uint32_t rva_to_file_offset(std::uint32_t const rva) const {
     auto const sec = rva_to_section(rva);
     if (!sec)
       return 0;
@@ -811,7 +773,7 @@ private:
   }
 
   // Get the section that an RVA is located inside of.
-  PIMAGE_SECTION_HEADER rva_to_section(std::uint32_t const rva) {
+  PIMAGE_SECTION_HEADER rva_to_section(std::uint32_t const rva) const {
     for (std::size_t i = 0; i < nt_header_->FileHeader.NumberOfSections; ++i) {
       auto& sec = sections_[i];
       if (rva >= sec.VirtualAddress && rva < (sec.VirtualAddress + sec.Misc.VirtualSize))
@@ -822,7 +784,7 @@ private:
   }
 
   // Return true if the provided RVA is in an executable section.
-  bool rva_in_exec_section(std::uint32_t const rva) {
+  bool rva_in_exec_section(std::uint32_t const rva) const {
     auto const sec = rva_to_section(rva);
     if (!sec)
       return false;
@@ -864,6 +826,116 @@ private:
     return bin.rva_map_[rva] = { sym_id, 0 };
   }
 
+  // Split the basic block at the specified RVA into two, and return the
+  // new RVA entry.
+  rva_map_entry& split_block(
+      std::uint32_t const rva, char const* const name = nullptr) {
+    std::size_t count        = 0;
+    basic_block* original_bb = nullptr;
+
+    // Calculate the number of instructions that should remain in
+    // the original basic block by following the linked list backwards.
+    for (auto curr_rva = rva; true; ++count) {
+      auto const& entry = bin.rva_map_[curr_rva];
+
+      // Keep walking until we reach the root.
+      if (entry.blink != 0) {
+        curr_rva -= entry.blink;
+        continue;
+      }
+
+      original_bb = bin.get_symbol(bin.rva_map_[curr_rva].sym_id)->bb;
+      break;
+    }
+
+    auto const new_bb = bin.create_basic_block(name);
+
+    // Steal the original block's fallthrough target.
+    new_bb->fallthrough_target = original_bb->fallthrough_target;
+    original_bb->fallthrough_target = new_bb->sym_id;
+
+    // Steal the tail end instructions from the original block.
+    new_bb->instructions.insert(begin(new_bb->instructions),
+      begin(original_bb->instructions) + count,
+      end(original_bb->instructions));
+    original_bb->instructions.erase(
+      begin(original_bb->instructions) + count,
+      end(original_bb->instructions));
+
+    return bin.rva_map_[rva] = { new_bb->sym_id, 0 };
+  };
+
+  // Probe the provided data symbol to see whether it contains a
+  // pointer or not. Return an RVA to the memory, if found.
+  std::uint32_t calc_potential_ptr(symbol const* const sym) const {
+    assert(sym->type == symbol_type::data);
+    assert(sym->db != nullptr);
+
+    // Make sure we dont read past the end of the data block.
+    if (sym->db_offset + 8 >= sym->db->bytes.size())
+      return 0;
+
+    // Read the data that the symbol points to.
+    std::uint64_t value = 0;
+    std::memcpy(&value, &sym->db->bytes[sym->db_offset], 8);
+
+    auto const image_base = nt_header_->OptionalHeader.ImageBase;
+    auto const image_size = nt_header_->OptionalHeader.SizeOfImage;
+
+    // Make sure we're dealing with a valid RVA.
+    if (value < image_base || value >= image_base + image_size)
+      return 0;
+
+    return static_cast<std::uint32_t>(value - image_base);
+  }
+
+  // Analyze the data symbol to see if it contains any further memory
+  // references. The RVA to the new memory reference is returned, if found.
+  // 0 is returned if an already-existing memory reference was found.
+  std::uint32_t analyze_data_symbol(symbol const* const sym) {
+    assert(sym->type == symbol_type::data);
+    assert(sym->db != nullptr);
+
+    auto const ptr_rva = calc_potential_ptr(sym);
+
+    // This data symbol does not contain a pointer.
+    if (!ptr_rva)
+      return 0;
+
+    auto& rva_entry = bin.rva_map_[ptr_rva];
+
+    // This memory reference already has a symbol for it.
+    if (rva_entry.sym_id)
+      return 0;
+
+    // The pointer points into the middle of a basic block.
+    if (rva_entry.blink != 0) {
+      split_block(ptr_rva);
+      return ptr_rva;
+    }
+
+    // We're dealing with a data pointer.
+    if (!rva_in_exec_section(ptr_rva)) {
+      std::uint32_t db_offset = 0;
+      auto const db = bin.rva_to_containing_db(ptr_rva, &db_offset);
+
+      if (!db)
+        return 0;
+
+      auto const sym = bin.create_symbol(symbol_type::data);
+      sym->db        = db;
+      sym->db_offset = db_offset;
+
+      rva_entry = { sym->id, 0 };
+
+      return ptr_rva;
+    }
+
+    // This is undiscovered code.
+    enqueue_rva(ptr_rva);
+    return ptr_rva;
+  }
+
 private:
   ZydisDecoder decoder_ = {};
 
@@ -899,8 +971,7 @@ std::optional<disassembled_binary> disassemble(char const* const path) {
   if (!dasm.disassemble())
     return {};
 
-  if (!dasm.verify())
-    return {};
+  assert(dasm.verify());
 
   return std::move(dasm.bin);
 }

@@ -58,6 +58,7 @@ int main() {
 
   std::printf("[+] Disassembled binary.\n");
 
+  std::printf("EP RVA: %X.\n", bin->symbol_to_rva(bin->entrypoint()->sym_id));
   //transform(*bin);
 
   bin->print();

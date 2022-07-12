@@ -22,6 +22,19 @@ symbol* disassembled_binary::rva_to_symbol(std::uint32_t const rva) const {
   return get_symbol(entry.sym_id);
 }
 
+// Get the RVA of a symbol.
+std::uint32_t disassembled_binary::symbol_to_rva(symbol_id const sym_id) const {
+  if (sym_id.value >= sym_rva_map_.size())
+    return 0;
+
+  return sym_rva_map_[sym_id.value];
+}
+
+// Get the RVA of a symbol.
+std::uint32_t disassembled_binary::symbol_to_rva(symbol const* const sym) const {
+  return symbol_to_rva(sym->id);
+}
+
 // Get the data block at the specified RVA.
 data_block* disassembled_binary::rva_to_db(std::uint32_t const rva) const {
   std::uint32_t offset = 0;
@@ -251,6 +264,7 @@ public:
         // Point this RVA to its import symbol.
         assert(bin.rva_map_[first_thunk_rva].sym_id == null_symbol_id);
         bin.rva_map_[first_thunk_rva] = { routine->sym_id, 0 };
+        bin.sym_rva_map_.push_back(first_thunk_rva);
       }
     }
   }
@@ -303,6 +317,7 @@ public:
         // Create a new data symbol.
         auto const sym = bin.create_symbol(symbol_type::data);
         bin.rva_map_[rva] = { sym->id, 0 };
+        bin.sym_rva_map_.push_back(rva);
       }
     }
 
@@ -417,7 +432,9 @@ public:
         auto sym = bin.create_symbol(symbol_type::data);
         sym->db = db;
         sym->db_offset = db_offset;
+
         rva_entry = { sym->id, 0 };
+        bin.sym_rva_map_.push_back(reloc_rva);
 
         // Keep analyzing the (possible) pointer chain.
         while (true) {
@@ -444,8 +461,7 @@ public:
       auto const file_start = rva_to_file_offset(rva_start);
 
       // TODO: Properly handle these cases.
-      if (file_start == 0)
-        continue;
+      assert(file_start != 0);
 
       auto const section = rva_to_section(rva_start);
       auto const file_end = file_start + section->SizeOfRawData;
@@ -575,6 +591,8 @@ public:
                 sym = bin.create_symbol(symbol_type::data);
                 sym->db = db;
                 sym->db_offset = offset;
+
+                bin.sym_rva_map_.push_back(target_rva);
               }
 
               // Add the symbol to the RVA map.
@@ -683,6 +701,9 @@ public:
   // This function is just used to double check that nothing weird is going
   // on.
   bool verify() {
+    if (bin.sym_rva_map_.size() != bin.symbols().size())
+      return false;
+
     for (auto const& bb : bin.basic_blocks()) {
       // We are not allowed to have empty basic blocks.
       if (bb->instructions.empty())
@@ -742,6 +763,9 @@ public:
       if (!sym)
         return false;
 
+      if (bin.symbol_to_rva(sym) != rva)
+        return false;
+
       ++sym_count;
 
       if (sym->type == symbol_type::code)
@@ -796,15 +820,8 @@ private:
   // block and code symbol for the specified RVA.
   rva_map_entry& enqueue_rva(
       std::uint32_t const rva, char const* const name = nullptr) {
-    // This RVA better point to executable code...
-    assert(rva_in_exec_section(rva));
-
-    disassembly_queue_.push(rva);
-
-    // Make sure we're not creating a duplicate symbol.
-    assert(bin.rva_map_[rva].sym_id == null_symbol_id);
-
-    return bin.rva_map_[rva] = { bin.create_basic_block(name)->sym_id, 0 };
+    bin.sym_rva_map_.push_back(rva);
+    return enqueue_rva(rva, bin.create_symbol(symbol_type::code, name)->id);
   }
 
   // Add an RVA to the disassembly queue. This function will create a basic
@@ -849,6 +866,7 @@ private:
     }
 
     auto const new_bb = bin.create_basic_block(name);
+    bin.sym_rva_map_.push_back(rva);
 
     // Steal the original block's fallthrough target.
     new_bb->fallthrough_target = original_bb->fallthrough_target;
@@ -926,6 +944,7 @@ private:
       sym->db        = db;
       sym->db_offset = db_offset;
 
+      bin.sym_rva_map_.push_back(ptr_rva);
       rva_entry = { sym->id, 0 };
 
       return ptr_rva;

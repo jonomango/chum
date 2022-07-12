@@ -33,6 +33,12 @@ public:
   // Get the symbol that an RVA points to.
   symbol* rva_to_symbol(std::uint32_t rva) const;
 
+  // Get the RVA of a symbol.
+  std::uint32_t symbol_to_rva(symbol_id sym_id) const;
+
+  // Get the RVA of a symbol.
+  std::uint32_t symbol_to_rva(symbol const* sym) const;
+
   // Get the data block at the specified RVA.
   data_block* rva_to_db(std::uint32_t rva) const;
 
@@ -53,6 +59,9 @@ private:
   void insert_data_block_in_rva_map(std::uint32_t rva, data_block* db);
 
 private:
+  // This is a map that contains the RVA of every symbol.
+  std::vector<std::uint32_t> sym_rva_map_ = { 0 };
+
   // This is a map that contains RVAs and their associated metadata.
   std::vector<rva_map_entry> rva_map_ = {};
 

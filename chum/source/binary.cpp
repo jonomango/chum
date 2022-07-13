@@ -135,6 +135,10 @@ void binary::print(bool const verbose) {
       std::printf("[+]   ID: %-6u Type: %-8s",
         sym->id.value, serialize_symbol_type(sym->type));
 
+      // Print the target, if it exists.
+      if (sym->type == symbol_type::data && sym->target)
+        std::printf(" Target: %-6u", sym->target.value);
+
       // Print the name, if it exists.
       if (!sym->name.empty())
         std::printf(" Name: %s\n", sym->name.c_str());

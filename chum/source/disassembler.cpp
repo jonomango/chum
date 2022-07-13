@@ -314,10 +314,21 @@ public:
       else {
         assert(section->Characteristics & IMAGE_SCN_MEM_READ);
 
+        std::uint32_t db_offset = 0;
+        auto const db = bin.rva_to_containing_db(rva, &db_offset);
+
+        assert(db != nullptr);
+
         // Create a new data symbol.
         auto const sym = bin.create_symbol(symbol_type::data);
+        sym->db        = db;
+        sym->db_offset = db_offset;
+        sym->target    = null_symbol_id;
+
         bin.rva_map_[rva] = { sym->id, 0 };
         bin.sym_rva_map_.push_back(rva);
+
+        fully_analyze_data_symbol(sym);
       }
     }
 
@@ -334,9 +345,6 @@ public:
 
       sym->name = name;
     }
-
-    // First pass: create symbols.
-    // Second pass: add names.
   }
 
   // Parse the exceptions directory and add any exception handlers to the
@@ -429,23 +437,15 @@ public:
         if (!db)
           continue;
 
-        auto sym = bin.create_symbol(symbol_type::data);
-        sym->db = db;
+        auto const sym = bin.create_symbol(symbol_type::data);
+        sym->db        = db;
         sym->db_offset = db_offset;
+        sym->target    = null_symbol_id;
 
         rva_entry = { sym->id, 0 };
         bin.sym_rva_map_.push_back(reloc_rva);
 
-        // Keep analyzing the (possible) pointer chain.
-        while (true) {
-          auto const rva = analyze_data_symbol(sym);
-          if (!rva)
-            break;
-
-          sym = bin.get_symbol(bin.rva_map_[rva].sym_id);
-          if (sym->type != symbol_type::data)
-            break;
-        }
+        fully_analyze_data_symbol(sym);
       }
     }
   }
@@ -589,35 +589,17 @@ public:
               if (db) {
                 // Create the new symbol.
                 sym = bin.create_symbol(symbol_type::data);
-                sym->db = db;
+                sym->db        = db;
                 sym->db_offset = offset;
+                sym->target    = null_symbol_id;
+
+                // TODO: Should we analyze this data symbol?
 
                 bin.sym_rva_map_.push_back(target_rva);
               }
 
               // Add the symbol to the RVA map.
               target_rva_entry = bin.rva_map_[target_rva] = { sym->id, 0 };
-
-              // Check to see whether this is a potential pointer.
-              if (db && decoded_instr.operand_width == 64 && target_rva % 8 == 0) {
-                // Keep analyzing the (possible) pointer chain.
-                while (true) {
-                  auto const rva = analyze_data_symbol(sym);
-                  if (!rva)
-                    break;
-
-                  sym = bin.get_symbol(bin.rva_map_[rva].sym_id);
-
-                  // This happens if we split the block that we are
-                  // currently building.
-                  if (rva >= rva_start && rva < rva_start + instr_offset)
-                    curr_bb = sym->bb;
-
-                  // We reached a dead end in the pointer chain.
-                  if (sym->type != symbol_type::data)
-                    break;
-                }
-              }
             }
 
             // Modify the displacement bytes to point to a symbol ID instead.
@@ -921,7 +903,7 @@ private:
   // Analyze the data symbol to see if it contains any further memory
   // references. The RVA to the new memory reference is returned, if found.
   // 0 is returned if an already-existing memory reference was found.
-  std::uint32_t analyze_data_symbol(symbol const* const sym) {
+  std::uint32_t analyze_data_symbol(symbol* const sym) {
     assert(sym->type == symbol_type::data);
     assert(sym->db != nullptr);
 
@@ -934,12 +916,14 @@ private:
     auto& rva_entry = bin.rva_map_[ptr_rva];
 
     // This memory reference already has a symbol for it.
-    if (rva_entry.sym_id)
+    if (rva_entry.sym_id) {
+      sym->target = rva_entry.sym_id;
       return 0;
+    }
 
     // The pointer points into the middle of a basic block.
     if (rva_entry.blink != 0) {
-      split_block(ptr_rva);
+      sym->target = split_block(ptr_rva).sym_id;
       return ptr_rva;
     }
 
@@ -951,19 +935,36 @@ private:
       if (!db)
         return 0;
 
-      auto const sym = bin.create_symbol(symbol_type::data);
-      sym->db        = db;
-      sym->db_offset = db_offset;
+      auto const new_sym = bin.create_symbol(symbol_type::data);
+      new_sym->db        = db;
+      new_sym->db_offset = db_offset;
+      new_sym->target    = null_symbol_id;
 
       bin.sym_rva_map_.push_back(ptr_rva);
-      rva_entry = { sym->id, 0 };
+      rva_entry = { new_sym->id, 0 };
+      sym->target = new_sym->id;
 
       return ptr_rva;
     }
 
     // This is undiscovered code.
-    enqueue_rva(ptr_rva);
+    sym->target = enqueue_rva(ptr_rva).sym_id;
+
     return ptr_rva;
+  }
+
+  // Analyze the data symbol, following the pointer chain all the way
+  // to the end.
+  void fully_analyze_data_symbol(symbol* sym) {
+    while (true) {
+      auto const rva = analyze_data_symbol(sym);
+      if (!rva)
+        break;
+
+      sym = bin.get_symbol(bin.rva_map_[rva].sym_id);
+      if (sym->type != symbol_type::data)
+        break;
+    }
   }
 
 private:

@@ -61,6 +61,9 @@ struct symbol {
 
       // This is the offset of the data from the start of the data block.
       std::uint32_t db_offset;
+
+      // If this data symbol is a pointer, this is the symbol that it points to.
+      symbol_id target;
     };
 
     // Valid only for import symbols.

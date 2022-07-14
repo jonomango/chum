@@ -2,8 +2,8 @@
 #include "util.h"
 
 #include <queue>
-#include <Windows.h>
 
+#include <Windows.h>
 #include <Zydis/Zydis.h>
 
 namespace chum {

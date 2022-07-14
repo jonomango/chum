@@ -41,8 +41,8 @@ int main() {
 
   //auto bin = chum::disassemble("C:\\Users\\realj\\Desktop\\dxgkrnl (lizerd).sys");
   //auto bin = chum::disassemble("C:\\Users\\realj\\Desktop\\kernel32.dll");
-  auto bin = chum::disassemble("hello-world-x64.dll");
-  //auto bin = chum::disassemble("hello-world-x64-min.dll");
+  //auto bin = chum::disassemble("hello-world-x64.dll");
+  auto bin = chum::disassemble("hello-world-x64-min.dll");
   //auto bin = chum::disassemble("split-block-1030.dll");
 
   auto const end_time = std::chrono::high_resolution_clock::now();
@@ -60,6 +60,13 @@ int main() {
 
   //transform(*bin);
 
-  bin->print(true);
+  bin->print();
+
+  if (!bin->create("C:\\Users\\realj\\Desktop\\chum-output.exe")) {
+    std::printf("[!] Failed to create output binary.\n");
+    return 0;
+  }
+
+  std::printf("[+] Created output binary.\n");
 }
 

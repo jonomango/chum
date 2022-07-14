@@ -34,6 +34,9 @@ public:
   // Print the contents of this binary, for debugging purposes.
   void print(bool verbose = false);
 
+  // Create a new PE file from this binary.
+  bool create(char const* path) const;
+
   // Get the entrypoint of this binary, if it exists.
   basic_block* entrypoint() const;
 

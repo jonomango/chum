@@ -2,7 +2,9 @@
 
 #include <cassert>
 #include <algorithm>
+#include <fstream>
 
+#include <Windows.h>
 #include <zycore/Format.h>
 
 namespace chum {
@@ -215,6 +217,70 @@ void binary::print(bool const verbose) {
       std::printf("[+]\n");
     }
   }
+}
+
+// Create a new PE file from this binary.
+bool binary::create(char const* const path) const {
+  std::ofstream file(path);
+  if (!file)
+    return false;
+
+  // Create a minimal MS-DOS header that just points to the PE header.
+  IMAGE_DOS_HEADER dos_header = {};
+  std::memset(&dos_header, 0, sizeof(dos_header));
+  dos_header.e_magic  = IMAGE_DOS_SIGNATURE;
+  dos_header.e_lfanew = sizeof(dos_header);
+  file.write(reinterpret_cast<char const*>(&dos_header), sizeof(dos_header));
+
+  IMAGE_NT_HEADERS64 nt_header = {};
+  std::memset(&nt_header, 0, sizeof(nt_header));
+  nt_header.Signature                                  = IMAGE_NT_SIGNATURE;
+  nt_header.FileHeader.Machine                         = IMAGE_FILE_MACHINE_AMD64;
+  nt_header.FileHeader.NumberOfSections                = 1;
+  nt_header.FileHeader.SizeOfOptionalHeader            = sizeof(nt_header.OptionalHeader);
+  nt_header.FileHeader.Characteristics                 = IMAGE_FILE_EXECUTABLE_IMAGE;
+  nt_header.OptionalHeader.Magic                       = IMAGE_NT_OPTIONAL_HDR64_MAGIC;
+  nt_header.OptionalHeader.AddressOfEntryPoint         = 0x1000;
+  nt_header.OptionalHeader.ImageBase                   = 0x140000000;
+  nt_header.OptionalHeader.SectionAlignment            = 0x1000; // Minimum alignment of all data blocks.
+  nt_header.OptionalHeader.FileAlignment               = 0x200; // Test lower than 0x200.
+  nt_header.OptionalHeader.MajorOperatingSystemVersion = 6;
+  nt_header.OptionalHeader.MinorOperatingSystemVersion = 0;
+  nt_header.OptionalHeader.MajorSubsystemVersion       = 6;
+  nt_header.OptionalHeader.MinorSubsystemVersion       = 0;
+  nt_header.OptionalHeader.SizeOfImage                 = 0x2000;
+  nt_header.OptionalHeader.SizeOfHeaders               = 0x200;
+  nt_header.OptionalHeader.Subsystem                   = IMAGE_SUBSYSTEM_WINDOWS_CUI;
+  nt_header.OptionalHeader.DllCharacteristics          = IMAGE_DLLCHARACTERISTICS_DYNAMIC_BASE | IMAGE_DLLCHARACTERISTICS_NX_COMPAT;
+  nt_header.OptionalHeader.SizeOfStackReserve          = 0x10000;
+  nt_header.OptionalHeader.SizeOfStackCommit           = 0x1000;
+  nt_header.OptionalHeader.SizeOfHeapReserve           = 0x10000;
+  nt_header.OptionalHeader.SizeOfHeapCommit            = 0x1000;
+  nt_header.OptionalHeader.NumberOfRvaAndSizes         = 16; // This can be lowered as a meme.
+  file.write(reinterpret_cast<char const*>(&nt_header), sizeof(nt_header));
+
+  IMAGE_SECTION_HEADER sections[1] = {};
+  std::memset(&sections, 0, sizeof(sections));
+  std::memcpy(&sections[0].Name, ".text\0\0\0", 8);
+  sections[0].Misc.VirtualSize = 1;
+  sections[0].VirtualAddress   = 0x1000;
+  sections[0].SizeOfRawData    = 0x200; // FileAlignment.
+  sections[0].PointerToRawData = 0x200;
+  sections[0].Characteristics  = IMAGE_SCN_CNT_CODE | IMAGE_SCN_MEM_EXECUTE | IMAGE_SCN_MEM_READ;
+  file.write(reinterpret_cast<char const*>(&sections), sizeof(sections));
+
+  // Fill with padding until we reach the .text section raw data.
+  while (file.tellp() < 0x200)
+    file.put(0);
+
+  // A single INT3 instruction in the .text section :)
+  file.put(0xCC);
+
+  // Align.
+  while (file.tellp() < 0x400)
+    file.put(0);
+
+  return true;
 }
 
 // Get the entrypoint of this binary, if it exists.

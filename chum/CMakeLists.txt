@@ -11,6 +11,8 @@ add_executable(chum
   "source/symbol.h"
   "source/disassembler.h"
   "source/disassembler.cpp"
+  "source/pe-builder.h"
+  "source/pe-builder.cpp"
   "source/util.h"
   "source/util.cpp"
 )

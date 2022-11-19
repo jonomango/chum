@@ -90,20 +90,25 @@ std::vector<std::uint8_t> pe_builder::create() const {
 
   std::vector<std::uint32_t> sym_to_rva(bin_.symbols().size(), 0);
 
-  for (auto const bb : bin_.basic_blocks()) {
-    sym_to_rva[bb->sym_id.value] = current_virtual_address + instr_offset;
+  sym_to_rva[bin_.entrypoint()->sym_id.value] = current_virtual_address + instr_offset;
+  contents.push_back(0xEB);
+  contents.push_back(0xFE);
+  instr_offset += 2;
 
-    for (auto const& instr : bb->instructions) {
-      contents.insert(end(contents),
-        std::begin(instr.bytes), std::begin(instr.bytes) + instr.length);
-      instr_offset += instr.length;
-    }
+  //for (auto const bb : bin_.basic_blocks()) {
+  //  sym_to_rva[bb->sym_id.value] = current_virtual_address + instr_offset;
 
-    contents.push_back(0xCC);
-    contents.push_back(0xCC);
-    contents.push_back(0xCC);
-    instr_offset += 3;
-  }
+  //  for (auto const& instr : bb->instructions) {
+  //    contents.insert(end(contents),
+  //      std::begin(instr.bytes), std::begin(instr.bytes) + instr.length);
+  //    instr_offset += instr.length;
+  //  }
+
+  //  contents.push_back(0xCB);
+  //  contents.push_back(0xCB);
+  //  contents.push_back(0xCB);
+  //  instr_offset += 2;
+  //}
 
   // The code section is the last section (after the data blocks).
   auto const code_section = section_header(contents, data_blocks.size());

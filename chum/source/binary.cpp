@@ -200,14 +200,13 @@ void binary::print(bool const verbose) {
       std::uint32_t instr_offset = 0;
       for (auto const& instr : bb->instructions) {
         ZydisDecodedInstruction decoded_instr;
-        ZydisDecodedOperand decoded_operands[ZYDIS_MAX_OPERAND_COUNT_VISIBLE];
+        ZydisDecodedOperand decoded_operands[ZYDIS_MAX_OPERAND_COUNT];
 
         ZydisDecoderDecodeFull(&decoder_, instr.bytes, instr.length,
-          &decoded_instr, decoded_operands, ZYDIS_MAX_OPERAND_COUNT_VISIBLE,
-          ZYDIS_DFLAG_VISIBLE_OPERANDS_ONLY);
+          &decoded_instr, decoded_operands);
 
         char buffer[128] = { 0 };
-        ZydisFormatterFormatInstructionEx(&formatter_, &decoded_instr,
+        ZydisFormatterFormatInstruction(&formatter_, &decoded_instr,
           decoded_operands, decoded_instr.operand_count_visible, buffer,
           128, 0, &symbols_);
 

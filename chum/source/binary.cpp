@@ -233,18 +233,77 @@ bool binary::create(char const* const path) const {
     .name(".text")
     .characteristics(IMAGE_SCN_MEM_EXECUTE);
   auto& text_sec_data = text_sec.data();
+  auto const text_sec_va = pe.virtual_address(text_sec);
+
+  // Symbol table that gets filled during the first pass.
+  std::vector<std::uint64_t> sym_to_va(symbols_.size(), 0);
 
   // Write every instruction to the text section (first pass).
   for (auto const& bb : basic_blocks_) {
+    // This block is already written (perhaps because it was a fallthrough target).
+    if (sym_to_va[bb->sym_id.value] != 0)
+      continue;
+
+    // Assign this basic block an address.
+    sym_to_va[bb->sym_id.value] = text_sec_va + text_sec_data.size();
+
     for (auto const& instr : bb->instructions) {
-      // This is ENTIRELY wrong, but its a good start...
+      auto const curr_instr_va = text_sec_va + text_sec_data.size();
+
+      // Decode the instruction so we can re-encode it with the
+      // correct operand values.
+      ZydisDecodedInstruction decoded_instr;
+      ZydisDecodedOperand decoded_ops[ZYDIS_MAX_OPERAND_COUNT];
+      ZYAN_ASSERT(ZYAN_SUCCESS(ZydisDecoderDecodeFull(&decoder_, instr.bytes,
+        instr.length, &decoded_instr, decoded_ops)));
+
+      // Create an encoder request from the decoded instruction.
+      ZydisEncoderRequest enc_req;
+      ZYAN_ASSERT(ZYAN_SUCCESS(ZydisEncoderDecodedInstructionToEncoderRequest(
+        &decoded_instr, decoded_ops, decoded_instr.operand_count_visible, &enc_req)));
+
+      // We want the encoder to choose the best branch size for us.
+      enc_req.branch_type  = ZYDIS_BRANCH_TYPE_NONE;
+      enc_req.branch_width = ZYDIS_BRANCH_WIDTH_NONE;
+
+      // Convert the relative addresses into absolute addresses.
+      if (decoded_instr.attributes & ZYDIS_ATTRIB_IS_RELATIVE) {
+        for (std::size_t i = 0; i < decoded_instr.operand_count_visible; ++i) {
+          auto& enc_op = enc_req.operands[i];
+
+          // Relative immediate operand.
+          if (decoded_ops[i].type == ZYDIS_OPERAND_TYPE_IMMEDIATE &&
+              decoded_ops[i].imm.is_relative) {
+            enc_op.imm.u = curr_instr_va;
+          }
+          // Relative memory reference.
+          else if (decoded_ops[i].type == ZYDIS_OPERAND_TYPE_MEMORY &&
+                   decoded_instr.raw.modrm.mod == 0 &&
+                   decoded_instr.raw.modrm.rm == 5) {
+            enc_op.mem.displacement = curr_instr_va;
+          }
+        }
+      }
+
+      // Encode the new instruction.
+      std::uint8_t instr_buffer[15];
+      std::size_t instr_length = 15;
+      ZYAN_ASSERT(ZYAN_SUCCESS(ZydisEncoderEncodeInstructionAbsolute(&enc_req,
+        &instr_buffer, &instr_length, curr_instr_va)));
+
+      // Append the new instruction to the text section.
       text_sec_data.insert(end(text_sec_data),
-        instr.bytes, instr.bytes + instr.length);
+        instr_buffer, instr_buffer + instr_length);
+    }
+
+    if (bb->fallthrough_target) {
+
     }
   }
 
   // Set the entrypoint to the start of the text section.
-  pe.entrypoint(pe.virtual_address(text_sec));
+  if (entrypoint_)
+    pe.entrypoint(sym_to_va[entrypoint_->sym_id.value]);
 
   return pe.write(path);
 }

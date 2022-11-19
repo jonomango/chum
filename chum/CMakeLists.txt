@@ -11,8 +11,6 @@ add_executable(chum
   "source/symbol.h"
   "source/disassembler.h"
   "source/disassembler.cpp"
-  "source/pe-builder.h"
-  "source/pe-builder.cpp"
   "source/util.h"
   "source/util.cpp"
 )
@@ -26,4 +24,5 @@ target_compile_features(chum PRIVATE
 # dependencies
 target_link_libraries(chum PRIVATE
   Zydis
+  pe-builder
 )

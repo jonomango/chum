@@ -1,3 +1,6 @@
 [submodule "extern/zydis"]
 	path = extern/zydis
 	url = https://github.com/zyantific/zydis
+[submodule "extern/pe-builder"]
+	path = extern/pe-builder
+	url = https://github.com/jonomango/pe-builder

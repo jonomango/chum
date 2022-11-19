@@ -1,5 +1,4 @@
 #include "binary.h"
-#include "pe-builder.h"
 
 #include <cassert>
 #include <algorithm>
@@ -7,6 +6,7 @@
 
 #include <Windows.h>
 #include <zycore/Format.h>
+#include <pe-builder/pe-builder.h>
 
 namespace chum {
 
@@ -221,7 +221,32 @@ void binary::print(bool const verbose) {
 
 // Create a new PE file from this binary.
 bool binary::create(char const* const path) const {
-  return pe_builder(*this).create(path);
+  pb::pe_builder pe;
+  pe.file_characteristics(IMAGE_FILE_DLL);
+
+  // We don't want to resize in the middle of adding sections.
+  if (pe.sections_until_resize() < 1 + data_blocks_.size())
+    return false;
+
+  // Create the .text section for holding code.
+  auto& text_sec = pe.section()
+    .name(".text")
+    .characteristics(IMAGE_SCN_MEM_EXECUTE);
+  auto& text_sec_data = text_sec.data();
+
+  // Write every instruction to the text section (first pass).
+  for (auto const& bb : basic_blocks_) {
+    for (auto const& instr : bb->instructions) {
+      // This is ENTIRELY wrong, but its a good start...
+      text_sec_data.insert(end(text_sec_data),
+        instr.bytes, instr.bytes + instr.length);
+    }
+  }
+
+  // Set the entrypoint to the start of the text section.
+  pe.entrypoint(pe.virtual_address(text_sec));
+
+  return pe.write(path);
 }
 
 // Get the entrypoint of this binary, if it exists.

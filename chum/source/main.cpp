@@ -62,7 +62,7 @@ int main() {
 
   bin->print(true);
 
-  if (!bin->create("C:\\Users\\realj\\Desktop\\chum-output.exe")) {
+  if (!bin->create("C:\\Users\\realj\\Desktop\\chum-output.dll")) {
     std::printf("[!] Failed to create output binary.\n");
     return 0;
   }

@@ -3,6 +3,7 @@
 #include <cassert>
 #include <algorithm>
 #include <fstream>
+#include <unordered_map>
 
 #include <Windows.h>
 #include <zycore/Format.h>
@@ -228,18 +229,46 @@ bool binary::create(char const* const path) const {
   if (pe.sections_until_resize() < 1 + data_blocks_.size())
     return false;
 
+  // Map a data block to its virtual address.
+  std::unordered_map<data_block*, std::uint64_t> db_to_va;
+
+  for (auto const db : data_blocks_) {
+    // Create a new section.
+    auto& sec = pe.section()
+      .name(".rdata")
+      .characteristics(IMAGE_SCN_MEM_READ);
+
+    // Add the +W characteristic if needed.
+    if (!db->read_only) {
+      sec.name(".data")
+         .characteristics(IMAGE_SCN_MEM_READ | IMAGE_SCN_MEM_WRITE);
+    }
+
+    // Copy the data from the data block into the section.
+    sec.data() = db->bytes;
+
+    db_to_va[db] = pe.virtual_address(sec);
+  }
+
+  // Symbol table that maps symbols to virtual addresses.
+  std::vector<std::uint64_t> sym_to_va(symbols_.size(), 0);
+
+  // Assign virtual addresses to the symbols that we already know.
+  for (auto const sym : symbols_) {
+    if (sym->type == symbol_type::data)
+      sym_to_va[sym->id.value] = db_to_va[sym->db] + sym->db_offset;
+  }
+
   // Create the .text section for holding code.
   auto& text_sec = pe.section()
     .name(".text")
     .characteristics(IMAGE_SCN_MEM_EXECUTE);
+
   auto& text_sec_data = text_sec.data();
   auto const text_sec_va = pe.virtual_address(text_sec);
 
-  // Symbol table that gets filled during the first pass.
-  std::vector<std::uint64_t> sym_to_va(symbols_.size(), 0);
-
   // Write every instruction to the text section (first pass).
-  for (auto const& bb : basic_blocks_) {
+  for (auto const bb : basic_blocks_) {
     // This block is already written (perhaps because it was a fallthrough target).
     if (sym_to_va[bb->sym_id.value] != 0)
       continue;
@@ -274,13 +303,30 @@ bool binary::create(char const* const path) const {
           // Relative immediate operand.
           if (decoded_ops[i].type == ZYDIS_OPERAND_TYPE_IMMEDIATE &&
               decoded_ops[i].imm.is_relative) {
-            enc_op.imm.u = curr_instr_va;
+            // We need to copy the symbol ID this way in order to workaround
+            // annoying sign bugs.
+            symbol_id sym_id = null_symbol_id;
+            std::memcpy(&sym_id.value, instr.bytes +
+              decoded_instr.raw.imm[0].offset, decoded_instr.raw.imm[0].size / 8);
+
+            if (sym_to_va[sym_id.value] != 0)
+              enc_op.imm.u = sym_to_va[sym_id.value];
+            else
+              enc_op.imm.u = curr_instr_va;
           }
           // Relative memory reference.
           else if (decoded_ops[i].type == ZYDIS_OPERAND_TYPE_MEMORY &&
                    decoded_instr.raw.modrm.mod == 0 &&
                    decoded_instr.raw.modrm.rm == 5) {
-            enc_op.mem.displacement = curr_instr_va;
+            // We need to copy the symbol ID this way in order to workaround
+            // annoying sign bugs.
+            symbol_id sym_id = null_symbol_id;
+            std::memcpy(&sym_id.value, instr.bytes + decoded_instr.raw.disp.offset, 4);
+
+            if (sym_to_va[sym_id.value] != 0)
+              enc_op.mem.displacement = sym_to_va[sym_id.value];
+            else
+              enc_op.mem.displacement = curr_instr_va;
           }
         }
       }

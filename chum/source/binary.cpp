@@ -259,6 +259,80 @@ bool binary::create(char const* const path) const {
       sym_to_va[sym->id.value] = db_to_va[sym->db] + sym->db_offset;
   }
 
+  if (!import_modules_.empty()) {
+    // Create the .idata section for holding the IAT.
+    auto& idata_sec = pe.section()
+      .name(".idata")
+      .characteristics(IMAGE_SCN_MEM_READ);
+
+    auto& idata_data = idata_sec.data();
+    auto const idata_rva = pe.rvirtual_address(idata_sec);
+
+    // Allocate space for every descriptor (plus the null descriptor).
+    idata_data.insert(end(idata_data), (import_modules_.size() + 1)
+      * sizeof(IMAGE_IMPORT_DESCRIPTOR) , 0);
+
+    for (std::size_t i = 0; i < import_modules_.size(); ++i) {
+      auto const& imp_mod = import_modules_[i];
+
+      // Set the Name RVA to the ASCII string we're about to append.
+      reinterpret_cast<PIMAGE_IMPORT_DESCRIPTOR>(
+        &idata_data[i * sizeof(IMAGE_IMPORT_DESCRIPTOR)])->Name =
+        idata_rva + static_cast<std::uint32_t>(idata_data.size());
+
+      // Append the name of this import module to the .idata section
+      // (plus the null-terminator).
+      idata_data.insert(end(idata_data), imp_mod->name(),
+        imp_mod->name() + std::strlen(imp_mod->name()) + 1);
+
+      // Set the OrigFirstThunk RVA to the name thunk table that we're about to append.
+      reinterpret_cast<PIMAGE_IMPORT_DESCRIPTOR>(
+        &idata_data[i * sizeof(IMAGE_IMPORT_DESCRIPTOR)])->OriginalFirstThunk =
+        idata_rva + static_cast<std::uint32_t>(idata_data.size());
+
+      auto const name_table_off = idata_data.size();
+
+      // Allocate the thunk table (plus the null thunk).
+      idata_data.insert(end(idata_data), 8 * (imp_mod->routines().size() + 1), 0);
+
+      for (std::size_t j = 0; j < imp_mod->routines().size(); ++j) {
+        auto const& routine = imp_mod->routines()[j];
+
+        // Set the RVA to the IMAGE_IMPORT_BY_NAME that we're about to append.
+        *reinterpret_cast<std::uint64_t*>(&idata_data[name_table_off + j * 8]) =
+          idata_rva + idata_data.size();
+
+        // IMAGE_IMPORT_BY_NAME::Hint.
+        idata_data.insert(end(idata_data), 2, 0);
+
+        // IMAGE_IMPORT_BY_NAME::Name.
+        idata_data.insert(end(idata_data), begin(routine->name), end(routine->name));
+        idata_data.insert(end(idata_data), 1, 0);
+      }
+
+      // Set the FirstThunk RVA to the thunk table that we're about to append.
+      reinterpret_cast<PIMAGE_IMPORT_DESCRIPTOR>(
+        &idata_data[i * sizeof(IMAGE_IMPORT_DESCRIPTOR)])->FirstThunk =
+        idata_rva + static_cast<std::uint32_t>(idata_data.size());
+
+      auto const thunk_table_off = idata_data.size();
+
+      // Allocate the thunk table which is identical to the name thunk table.
+      idata_data.insert(end(idata_data), 8 * (imp_mod->routines().size() + 1), 0);
+      std::memcpy(&idata_data[thunk_table_off],
+        &idata_data[name_table_off], 8 * imp_mod->routines().size());
+
+      // Set the symbol VAs in the symbol table for each routine.
+      for (std::size_t j = 0; j < imp_mod->routines().size(); ++j) {
+        sym_to_va[imp_mod->routines()[j]->sym_id.value] =
+          pe.virtual_address(idata_sec) + thunk_table_off + j * 8;
+      }
+    }
+
+    pe.data_directory(IMAGE_DIRECTORY_ENTRY_IMPORT,
+      idata_rva, static_cast<std::uint32_t>(idata_data.size()));
+  }
+
   // Create the .text section for holding code.
   auto& text_sec = pe.section()
     .name(".text")

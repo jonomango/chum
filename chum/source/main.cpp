@@ -60,7 +60,10 @@ int main() {
 
   //transform(*bin);
 
-  bin->print(true);
+  //bin->print(true);
+
+  bin->get_or_create_import_routine("my_fat_cock.dll", "YourMom");
+  bin->get_or_create_import_routine("my_fat_cock.dll", "YourSister");
 
   if (!bin->create("C:\\Users\\realj\\Desktop\\chum-output.dll")) {
     std::printf("[!] Failed to create output binary.\n");

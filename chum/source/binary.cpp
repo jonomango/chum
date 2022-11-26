@@ -341,6 +341,14 @@ bool binary::create(char const* const path) const {
   auto& text_sec_data = text_sec.data();
   auto const text_sec_va = pe.virtual_address(text_sec);
 
+  struct delayed_reloc_entry {
+    std::uint32_t offset;
+    std::uint8_t  size;
+    symbol_id     sym_id;
+  };
+
+  std::vector<delayed_reloc_entry> delayed_relocs = {};
+
   // Write every instruction to the text section (first pass).
   for (auto const bb : basic_blocks_) {
     // This block is already written (perhaps because it was a fallthrough target).
@@ -369,6 +377,8 @@ bool binary::create(char const* const path) const {
       enc_req.branch_type  = ZYDIS_BRANCH_TYPE_NONE;
       enc_req.branch_width = ZYDIS_BRANCH_WIDTH_NONE;
 
+      symbol_id delay_sym_id = null_symbol_id;
+
       // Convert the relative addresses into absolute addresses.
       if (decoded_instr.attributes & ZYDIS_ATTRIB_IS_RELATIVE) {
         for (std::size_t i = 0; i < decoded_instr.operand_count_visible; ++i) {
@@ -385,8 +395,12 @@ bool binary::create(char const* const path) const {
 
             if (sym_to_va[sym_id.value] != 0)
               enc_op.imm.u = sym_to_va[sym_id.value];
-            else
-              enc_op.imm.u = curr_instr_va;
+            else {
+              delay_sym_id = sym_id;
+
+              // Force the encoder to use the largest branch size.
+              enc_op.imm.u = curr_instr_va + 0x12345678;
+            }
           }
           // Relative memory reference.
           else if (decoded_ops[i].type == ZYDIS_OPERAND_TYPE_MEMORY &&
@@ -399,8 +413,12 @@ bool binary::create(char const* const path) const {
 
             if (sym_to_va[sym_id.value] != 0)
               enc_op.mem.displacement = sym_to_va[sym_id.value];
-            else
-              enc_op.mem.displacement = curr_instr_va;
+            else {
+              delay_sym_id = sym_id;
+
+              // Force the encoder to use the largest branch size.
+              enc_op.mem.displacement = curr_instr_va + 0x12345678;
+            }
           }
         }
       }
@@ -414,11 +432,35 @@ bool binary::create(char const* const path) const {
       // Append the new instruction to the text section.
       text_sec_data.insert(end(text_sec_data),
         instr_buffer, instr_buffer + instr_length);
+
+      if (delay_sym_id) {
+        delayed_relocs.push_back({
+          static_cast<std::uint32_t>(text_sec_data.size() - 4),
+          4,
+          delay_sym_id
+        });
+      }
     }
 
     if (bb->fallthrough_target) {
 
     }
+  }
+
+  // Patch every delayed reloc.
+  for (auto const& reloc : delayed_relocs) {
+    if (!sym_to_va[reloc.sym_id.value]) {
+      printf("Unresolved symbol.\n");
+      return false;
+    }
+
+    auto const rip = text_sec_va + reloc.offset + reloc.size;
+    auto const off = static_cast<std::uint32_t>(
+      sym_to_va[reloc.sym_id.value] - rip);
+
+    assert(reloc.size == 4);
+    printf("%X.\n", off);
+    std::memcpy(&text_sec_data[reloc.offset], &off, reloc.size);
   }
 
   // Set the entrypoint to the start of the text section.

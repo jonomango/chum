@@ -437,10 +437,10 @@ public:
         if (!db)
           continue;
 
-        auto const sym = bin.create_symbol(symbol_type::data);
-        sym->db        = db;
-        sym->db_offset = db_offset;
-        sym->target    = null_symbol_id;
+        auto const sym        = bin.create_symbol(symbol_type::data);
+        sym->db               = db;
+        sym->db_offset        = db_offset;
+        sym->target           = null_symbol_id;
 
         rva_entry = { sym->id, 0 };
         bin.sym_rva_map_.push_back(reloc_rva);
@@ -482,8 +482,9 @@ public:
           file_buffer_.size() - (file_start + instr_offset);
 
         // Decode the current instruction.
+        ZydisDecoderContext decoded_ctx;
         ZydisDecodedInstruction decoded_instr;
-        if (ZYAN_FAILED(ZydisDecoderDecodeInstruction(&decoder_, nullptr,
+        if (ZYAN_FAILED(ZydisDecoderDecodeInstruction(&decoder_, &decoded_ctx,
             curr_instr_buffer, remaining_buffer_length, &decoded_instr))) {
           std::printf("[!] Failed to decode instruction.\n");
           std::printf("[!]   RVA: 0x%X.\n", rva_start + instr_offset);
@@ -540,10 +541,28 @@ public:
             }
             // Re-encode the new instruction.
             else {
-              std::uint32_t zero = 0;
-              std::memcpy(instr.bytes + decoded_instr.raw.imm[0].offset,
-                &zero, decoded_instr.raw.imm[0].size / 8);
-              //assert(false);
+              if (rva_start + instr_offset == 0x10CA)
+                std::printf("REAL SYMID: %X.\n", target_rva_entry.sym_id.value);
+
+              ZydisDecodedOperand decoded_ops[ZYDIS_MAX_OPERAND_COUNT_VISIBLE];
+              ZYAN_ASSERT(ZYAN_SUCCESS(ZydisDecoderDecodeOperands(&decoder_, &decoded_ctx,
+                &decoded_instr, decoded_ops, decoded_instr.operand_count_visible)));
+
+              ZydisEncoderRequest enc_req;
+              ZYAN_ASSERT(ZYAN_SUCCESS(ZydisEncoderDecodedInstructionToEncoderRequest(
+                &decoded_instr, decoded_ops, decoded_instr.operand_count_visible, &enc_req)));
+
+              // We want the encoder to choose the best branch size for us.
+              enc_req.branch_type  = ZYDIS_BRANCH_TYPE_NONE;
+              enc_req.branch_width = ZYDIS_BRANCH_WIDTH_NONE;
+
+              // This might have sign issues? Not sure yet, don't care.
+              enc_req.operands[0].imm.u = target_rva_entry.sym_id.value;
+
+              std::size_t length = sizeof(instr.bytes);
+              ZYAN_ASSERT(ZYAN_SUCCESS(ZydisEncoderEncodeInstruction(
+                &enc_req, instr.bytes, &length)));
+              instr.length = length;
             }
           }
           // RIP relative memory references.

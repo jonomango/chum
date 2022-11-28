@@ -63,6 +63,7 @@ struct symbol {
       std::uint32_t db_offset;
 
       // If this data symbol is a pointer, this is the symbol that it points to.
+      // These symbols point to absolute addresses, therefore they need base relocs.
       symbol_id target;
     };
 

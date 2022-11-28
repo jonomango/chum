@@ -223,7 +223,7 @@ void binary::print(bool const verbose) {
 // Create a new PE file from this binary.
 bool binary::create(char const* const path) const {
   pb::pe_builder pe;
-  pe.file_characteristics(IMAGE_FILE_DLL);
+  pe.file_characteristics(IMAGE_FILE_EXECUTABLE_IMAGE | IMAGE_FILE_DLL);
 
   // We don't want to resize in the middle of adding sections.
   if (pe.sections_until_resize() < 1 + data_blocks_.size())
@@ -231,6 +231,9 @@ bool binary::create(char const* const path) const {
 
   // Map a data block to its virtual address.
   std::unordered_map<data_block*, std::uint64_t> db_to_va;
+
+  // Map a data block to its section.
+  std::unordered_map<data_block*, pb::pe_section*> db_to_sec;
 
   for (auto const db : data_blocks_) {
     // Create a new section.
@@ -248,17 +251,47 @@ bool binary::create(char const* const path) const {
     sec.data() = db->bytes;
 
     db_to_va[db] = pe.virtual_address(sec);
+    db_to_sec[db] = &sec;
   }
 
   // Symbol table that maps symbols to virtual addresses.
   std::vector<std::uint64_t> sym_to_va(symbols_.size(), 0);
 
+  bool has_base_relocs = false;
+
   // Assign virtual addresses to the symbols that we already know.
   for (auto const sym : symbols_) {
-    if (sym->type == symbol_type::data)
-      sym_to_va[sym->id.value] = db_to_va[sym->db] + sym->db_offset;
+    if (sym->type != symbol_type::data)
+      continue;
+
+    sym_to_va[sym->id.value] = db_to_va[sym->db] + sym->db_offset;
+
+    if (sym->target)
+      has_base_relocs = true;
   }
 
+  // Handle base relocs (data symbols that point to another symbol).
+  if (has_base_relocs) {
+    // Create the .relocs section for holding base reloc information.
+    auto& relocs_sec = pe.section()
+      .name(".relocs")
+      .characteristics(IMAGE_SCN_MEM_READ);
+
+    for (auto const sym : symbols_) {
+      if (sym->type != symbol_type::data || !sym->target)
+        continue;
+
+      // Patch the pointer so that it points to the right address.
+      auto const sec = db_to_sec[sym->db];
+
+      // Make sure we have enough space to perform the patch.
+      assert(sym->db_offset + 8 <= sec->data().size());
+
+      std::memcpy(&sec->data()[sym->db_offset], &sym_to_va[sym->target.value], 8);
+    }
+  }
+
+  // Handle imports.
   if (!import_modules_.empty()) {
     // Create the .idata section for holding the IAT.
     auto& idata_sec = pe.section()
@@ -392,6 +425,11 @@ bool binary::create(char const* const path) const {
             symbol_id sym_id = null_symbol_id;
             std::memcpy(&sym_id.value, instr.bytes +
               decoded_instr.raw.imm[0].offset, decoded_instr.raw.imm[0].size / 8);
+            assert(sym_id != null_symbol_id);
+
+            if (curr_instr_va == 0x1400080B9)
+              //__debugbreak();
+              std::printf("FROG! %X\n", sym_id.value);
 
             if (sym_to_va[sym_id.value] != 0)
               enc_op.imm.u = sym_to_va[sym_id.value];
@@ -410,6 +448,7 @@ bool binary::create(char const* const path) const {
             // annoying sign bugs.
             symbol_id sym_id = null_symbol_id;
             std::memcpy(&sym_id.value, instr.bytes + decoded_instr.raw.disp.offset, 4);
+            //assert(sym_id != null_symbol_id);
 
             if (sym_to_va[sym_id.value] != 0)
               enc_op.mem.displacement = sym_to_va[sym_id.value];
@@ -459,7 +498,6 @@ bool binary::create(char const* const path) const {
       sym_to_va[reloc.sym_id.value] - rip);
 
     assert(reloc.size == 4);
-    printf("%X.\n", off);
     std::memcpy(&text_sec_data[reloc.offset], &off, reloc.size);
   }
 

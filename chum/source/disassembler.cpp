@@ -434,8 +434,15 @@ public:
         auto db = bin.rva_to_containing_db(reloc_rva, &db_offset);
 
         // This might happen if the RVA lands in the PE header... maybe.
-        if (!db)
+        if (!db) {
+          auto const sym = bin.create_symbol(symbol_type::rel_data);
+          sym->rel_offset = reloc_rva;
+
+          rva_entry = { sym->id, 0 };
+          bin.sym_rva_map_.push_back(reloc_rva);
+
           continue;
+        }
 
         auto const sym        = bin.create_symbol(symbol_type::data);
         sym->db               = db;
@@ -541,9 +548,6 @@ public:
             }
             // Re-encode the new instruction.
             else {
-              if (rva_start + instr_offset == 0x10CA)
-                std::printf("REAL SYMID: %X.\n", target_rva_entry.sym_id.value);
-
               ZydisDecodedOperand decoded_ops[ZYDIS_MAX_OPERAND_COUNT_VISIBLE];
               ZYAN_ASSERT(ZYAN_SUCCESS(ZydisDecoderDecodeOperands(&decoder_, &decoded_ctx,
                 &decoded_instr, decoded_ops, decoded_instr.operand_count_visible)));
@@ -600,22 +604,27 @@ public:
               std::uint32_t offset = 0;
               auto const db = bin.rva_to_containing_db(target_rva, &offset);
 
-              // If we cant find the containing data block, just use the null
-              // symbol. This can occur if the binary is referencing memory
-              // in the PE header, which we don't map.
-              auto sym = bin.get_symbol(null_symbol_id);
+              symbol* sym = nullptr;
 
               if (db) {
-                // Create the new symbol.
+                // Create the new data symbol.
                 sym = bin.create_symbol(symbol_type::data);
                 sym->db        = db;
                 sym->db_offset = offset;
                 sym->target    = null_symbol_id;
 
                 // TODO: Should we analyze this data symbol?
-
-                bin.sym_rva_map_.push_back(target_rva);
               }
+              // Addresses that don't land in a data block are marked as
+              // relative data symbols. This only really works for addresses
+              // that are in the PE header.
+              else {
+                // Create the new relative data symbol.
+                sym = bin.create_symbol(symbol_type::rel_data);
+                sym->rel_offset = target_rva;
+              }
+
+              bin.sym_rva_map_.push_back(target_rva);
 
               // Add the symbol to the RVA map.
               target_rva_entry = bin.rva_map_[target_rva] = { sym->id, 0 };

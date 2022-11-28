@@ -15,6 +15,10 @@ enum class symbol_type {
   // A data symbol points to a location inside of a data block.
   data,
 
+  // A rel_data symbol points to a location relatives to the image base.
+  // This is usually used for accessing data in the PE header.
+  rel_data,
+
   // An import symbol points to a location inside of an import table.
   import
 };
@@ -22,9 +26,10 @@ enum class symbol_type {
 // Get the string representation of a symbol type.
 inline constexpr char const* serialize_symbol_type(symbol_type const type) {
   switch (type) {
-  case symbol_type::code:   return "code";
-  case symbol_type::data:   return "data";
-  case symbol_type::import: return "import";
+  case symbol_type::code:     return "code";
+  case symbol_type::data:     return "data";
+  case symbol_type::rel_data: return "rel_data";
+  case symbol_type::import:   return "import";
   default: return "invalid";
   }
 }
@@ -66,6 +71,9 @@ struct symbol {
       // These symbols point to absolute addresses, therefore they need base relocs.
       symbol_id target;
     };
+
+    // Valid only for relative data symbols.
+    std::uint32_t rel_offset;
 
     // Valid only for import symbols.
     struct import_routine* ir;

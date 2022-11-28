@@ -261,13 +261,15 @@ bool binary::create(char const* const path) const {
 
   // Assign virtual addresses to the symbols that we already know.
   for (auto const sym : symbols_) {
-    if (sym->type != symbol_type::data)
-      continue;
+    if (sym->type == symbol_type::data) {
+      sym_to_va[sym->id.value] = db_to_va[sym->db] + sym->db_offset;
 
-    sym_to_va[sym->id.value] = db_to_va[sym->db] + sym->db_offset;
-
-    if (sym->target)
-      has_base_relocs = true;
+      if (sym->target)
+        has_base_relocs = true;
+    }
+    else if (sym->type == symbol_type::rel_data) {
+      sym_to_va[sym->id.value] = pe.image_base() + sym->rel_offset;
+    }
   }
 
   // Handle base relocs (data symbols that point to another symbol).
@@ -427,10 +429,6 @@ bool binary::create(char const* const path) const {
               decoded_instr.raw.imm[0].offset, decoded_instr.raw.imm[0].size / 8);
             assert(sym_id != null_symbol_id);
 
-            if (curr_instr_va == 0x1400080B9)
-              //__debugbreak();
-              std::printf("FROG! %X\n", sym_id.value);
-
             if (sym_to_va[sym_id.value] != 0)
               enc_op.imm.u = sym_to_va[sym_id.value];
             else {
@@ -448,7 +446,7 @@ bool binary::create(char const* const path) const {
             // annoying sign bugs.
             symbol_id sym_id = null_symbol_id;
             std::memcpy(&sym_id.value, instr.bytes + decoded_instr.raw.disp.offset, 4);
-            //assert(sym_id != null_symbol_id);
+            assert(sym_id != null_symbol_id);
 
             if (sym_to_va[sym_id.value] != 0)
               enc_op.mem.displacement = sym_to_va[sym_id.value];

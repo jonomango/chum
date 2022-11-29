@@ -3,37 +3,18 @@
 #include <chrono>
 
 void transform(chum::binary& bin) {
-  auto const entrypoint = bin.entrypoint();
-  if (!entrypoint)
-    return;
+  // Create a basic block.
+  auto const block = bin.create_basic_block();
+  block->push(bin.instr("\x90")); // NOP
+  block->push(bin.instr("\xC3")); // RET
 
-  // Allocate a data block to hold a string.
-  auto const hello_world_db = bin.create_data_block("Hello world!", 13);
-  hello_world_db->read_only = true;
+  for (auto const bb : bin.basic_blocks()) {
+    if (bb == block)
+      continue;
 
-  // Create a symbol to the string.
-  auto const hello_world_sym = bin.create_symbol(
-    chum::symbol_type::data, "hello_world_str");
-  hello_world_sym->db = hello_world_db;
-  hello_world_sym->db_offset = 0;
-
-  // Import the MessageBoxA routine.
-  auto const message_box = bin.get_or_create_import_routine(
-    "user32.dll", "MessageBoxA");
-
-  // Create a basic block that opens a message box.
-  auto const block = bin.create_basic_block("jono_block");
-  block->push(bin.instr("\x48\x83\xEC\x20"));              // sub rsp, 0x20
-  block->push(bin.instr("\x48\x31\xC9"));                  // xor rcx, rcx
-  block->push(bin.instr("\x48\x8D\x15", hello_world_sym)); // lea rdx, hello_world
-  block->push(bin.instr("\x4D\x31\xC0"));                  // xor r8, r8
-  block->push(bin.instr("\x45\x31\xC9"));                  // xor r9d, r9d
-  block->push(bin.instr("\xFF\x15", message_box));         // call message_box
-  block->push(bin.instr("\x48\x83\xC4\x20"));              // add rsp, 0x20
-  block->push(bin.instr("\xC3"));                          // ret
-
-  // Insert a CALL to our instrumentation block at the start of the entrypoint.
-  entrypoint->insert(bin.instr("\xE8", block));
+    // Insert a CALL to our instrumentation block at the start of every basic block.
+    bb->insert(bin.instr("\xE8", block));
+  }
 }
 
 int main() {
@@ -58,7 +39,7 @@ int main() {
 
   std::printf("[+] Disassembled binary.\n");
 
-  //transform(*bin);
+  transform(*bin);
 
   bin->print();
 

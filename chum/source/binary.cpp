@@ -4,6 +4,8 @@
 #include <algorithm>
 #include <fstream>
 #include <unordered_map>
+#include <map>
+#include <set>
 
 #include <Windows.h>
 #include <zycore/Format.h>
@@ -272,27 +274,6 @@ bool binary::create(char const* const path) const {
     }
   }
 
-  // Handle base relocs (data symbols that point to another symbol).
-  if (has_base_relocs) {
-    // Create the .relocs section for holding base reloc information.
-    auto& relocs_sec = pe.section()
-      .name(".relocs")
-      .characteristics(IMAGE_SCN_MEM_READ);
-
-    for (auto const sym : symbols_) {
-      if (sym->type != symbol_type::data || !sym->target)
-        continue;
-
-      // Patch the pointer so that it points to the right address.
-      auto const sec = db_to_sec[sym->db];
-
-      // Make sure we have enough space to perform the patch.
-      assert(sym->db_offset + 8 <= sec->data().size());
-
-      std::memcpy(&sec->data()[sym->db_offset], &sym_to_va[sym->target.value], 8);
-    }
-  }
-
   // Handle imports.
   if (!import_modules_.empty()) {
     // Create the .idata section for holding the IAT.
@@ -497,6 +478,73 @@ bool binary::create(char const* const path) const {
 
     assert(reloc.size == 4);
     std::memcpy(&text_sec_data[reloc.offset], &off, reloc.size);
+  }
+
+  // Handle base relocs (data symbols that point to another symbol).
+  if (has_base_relocs) {
+    // This is a sorted map where the key is a PFN of a reloc block.
+    std::map<std::uint32_t, std::set<std::uint16_t>> reloc_blocks = {};
+
+    for (auto const sym : symbols_) {
+      if (sym->type != symbol_type::data || !sym->target)
+        continue;
+
+      auto const sec = db_to_sec[sym->db];
+
+      // Make sure we have enough space to perform the patch.
+      assert(sym->db_offset + 8 <= sec->data().size());
+
+      // Patch the pointer so that it points to the right address.
+      std::memcpy(&sec->data()[sym->db_offset], &sym_to_va[sym->target.value], 8);
+
+      // RVA of where the base reloc adjustment should occur.
+      auto const rva = static_cast<std::uint32_t>(
+        db_to_va[sym->db] - pe.image_base()) + sym->db_offset;
+
+      // Get the current reloc block (or create an empty one if it doesn't
+      // exist). Yes this looks weird.
+      auto& block = reloc_blocks.insert({ rva >> 12, {} }).first->second;
+      block.emplace(rva & 0xFFF);
+    }
+
+    // Create the .reloc section for holding base reloc information.
+    auto& reloc_sec = pe.section()
+      .name(".reloc")
+      .characteristics(IMAGE_SCN_MEM_READ);
+    auto& reloc_data = reloc_sec.data();
+
+    struct base_reloc_entry {
+      std::uint16_t offset : 12;
+      std::uint16_t type   : 4;
+    };
+
+    for (auto const& [pfn, block] : reloc_blocks) {
+      // Current offset into the section.
+      auto const block_off = reloc_data.size();
+
+      // # of base relocs should always be even (to stay word aligned).
+      auto const padding = (block.size() % 2) * sizeof(base_reloc_entry);
+
+      // Allocate space in the section for the block header + relocations.
+      reloc_data.insert(end(reloc_data), sizeof(IMAGE_BASE_RELOCATION) +
+        sizeof(base_reloc_entry) * block.size() + padding, 0);
+
+      auto const hdr = reinterpret_cast<PIMAGE_BASE_RELOCATION>(
+        &reloc_data[block_off]);
+      auto const entries = reinterpret_cast<base_reloc_entry*>(
+        &reloc_data[block_off + sizeof(IMAGE_BASE_RELOCATION)]);
+
+      hdr->VirtualAddress = pfn << 12;
+      hdr->SizeOfBlock = static_cast<std::uint32_t>(
+        reloc_data.size() - block_off);
+
+      std::size_t i = 0;
+      for (auto const off : block)
+        entries[i++] = { off, IMAGE_REL_BASED_DIR64 };
+    }
+
+    pe.data_directory(IMAGE_DIRECTORY_ENTRY_BASERELOC,
+      pe.rvirtual_address(reloc_sec), static_cast<std::uint32_t>(reloc_data.size()));
   }
 
   // Set the entrypoint to the start of the text section.

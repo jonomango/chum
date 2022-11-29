@@ -1,6 +1,8 @@
 #include "chum.h"
 
 #include <chrono>
+#include <algorithm>
+#include <random>
 
 void transform(chum::binary& bin) {
   // Create a basic block.
@@ -12,8 +14,10 @@ void transform(chum::binary& bin) {
     if (bb == block)
       continue;
 
-    // Insert a CALL to our instrumentation block at the start of every basic block.
-    bb->insert(bin.instr("\xE8", block));
+    for (std::size_t i = bb->instructions.size(); i > 0; --i) {
+      // Insert a CALL to our instrumentation block at the start of every basic block.
+      bb->insert(bin.instr("\x90"), i - 1);
+    }
   }
 }
 
@@ -39,7 +43,11 @@ int main() {
 
   std::printf("[+] Disassembled binary.\n");
 
-  transform(*bin);
+  auto rd = std::random_device{}; 
+  auto rng = std::default_random_engine{ rd() };
+  std::shuffle(std::begin(bin->basic_blocks()), std::end(bin->basic_blocks()), rng);
+
+  //transform(*bin);
 
   bin->print();
 

@@ -366,10 +366,11 @@ bool binary::create(char const* const path) const {
   std::vector<delayed_reloc_entry> delayed_relocs = {};
 
   // Write every instruction to the text section (first pass).
-  for (auto const bb : basic_blocks_) {
-    // This block is already written (perhaps because it was a fallthrough target).
-    if (sym_to_va[bb->sym_id.value] != 0)
-      continue;
+  for (std::size_t block_idx = 0; block_idx < basic_blocks_.size(); ++block_idx) {
+    auto const bb = basic_blocks_[block_idx];
+
+    // Make sure this block isn't written already.
+    assert(sym_to_va[bb->sym_id.value] == 0);
 
     // Assign this basic block an address.
     sym_to_va[bb->sym_id.value] = text_sec_va + text_sec_data.size();
@@ -460,8 +461,40 @@ bool binary::create(char const* const path) const {
       }
     }
 
-    if (bb->fallthrough_target) {
+    if (!bb->fallthrough_target)
+      continue;
 
+    // If the next block is the fallthrough block, there is no need to do anything.
+    if (block_idx < basic_blocks_.size() - 1 &&
+        basic_blocks_[block_idx + 1]->sym_id == bb->fallthrough_target)
+      continue;
+
+    auto const ft_sym = get_symbol(bb->fallthrough_target);
+
+    // TODO: Treat the fallthrough target instruction like a normal bb instruction
+    //       so that we can support different symbol types (like imports).
+    assert(ft_sym->type == symbol_type::code);
+
+    // JMP [RIP+0]
+    std::uint8_t rel_jmp[5] = { 0xE9, 0, 0, 0, 0 };
+
+    // The fallthrough target has already been assigned an address.
+    if (sym_to_va[ft_sym->id.value]) {
+      auto const rip = text_sec_va + text_sec_data.size() + 5;
+      auto const delta = static_cast<std::uint32_t>(
+        sym_to_va[ft_sym->id.value] - rip);
+      std::memcpy(rel_jmp + 1, &delta, 4);
+
+      text_sec_data.insert(end(text_sec_data), rel_jmp, rel_jmp + 5);
+    }
+    // The fallthrough block is after the current block.
+    else {
+      text_sec_data.insert(end(text_sec_data), rel_jmp, rel_jmp + 5);
+      delayed_relocs.push_back({
+        static_cast<std::uint32_t>(text_sec_data.size() - 4),
+        4,
+        ft_sym->id
+      });
     }
   }
 

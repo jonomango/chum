@@ -159,8 +159,9 @@ public:
   // only be called ONCE for each instantiation.
   bool initialize(char const* const path) {
     // Initialize the Zydis decoder for x86-64.
-    assert(ZYAN_SUCCESS(ZydisDecoderInit(&decoder_,
-      ZYDIS_MACHINE_MODE_LONG_64, ZYDIS_STACK_WIDTH_64)));
+    if (ZYAN_FAILED(ZydisDecoderInit(&decoder_,
+        ZYDIS_MACHINE_MODE_LONG_64, ZYDIS_STACK_WIDTH_64)))
+      return false;
 
     file_buffer_ = read_file_to_buffer(path);
     if (file_buffer_.empty())
@@ -549,12 +550,14 @@ public:
             // Re-encode the new instruction.
             else {
               ZydisDecodedOperand decoded_ops[ZYDIS_MAX_OPERAND_COUNT_VISIBLE];
-              ZYAN_ASSERT(ZYAN_SUCCESS(ZydisDecoderDecodeOperands(&decoder_, &decoded_ctx,
-                &decoded_instr, decoded_ops, decoded_instr.operand_count_visible)));
+              if (ZYAN_FAILED(ZydisDecoderDecodeOperands(&decoder_, &decoded_ctx,
+                  &decoded_instr, decoded_ops, decoded_instr.operand_count_visible)))
+                return false;
 
               ZydisEncoderRequest enc_req;
-              ZYAN_ASSERT(ZYAN_SUCCESS(ZydisEncoderDecodedInstructionToEncoderRequest(
-                &decoded_instr, decoded_ops, decoded_instr.operand_count_visible, &enc_req)));
+              if (ZYAN_FAILED(ZydisEncoderDecodedInstructionToEncoderRequest(
+                  &decoded_instr, decoded_ops, decoded_instr.operand_count_visible, &enc_req)))
+                return false;
 
               // We want the encoder to choose the best branch size for us.
               enc_req.branch_type  = ZYDIS_BRANCH_TYPE_NONE;
@@ -564,8 +567,10 @@ public:
               enc_req.operands[0].imm.u = target_rva_entry.sym_id.value;
 
               std::size_t length = sizeof(instr.bytes);
-              ZYAN_ASSERT(ZYAN_SUCCESS(ZydisEncoderEncodeInstruction(
-                &enc_req, instr.bytes, &length)));
+              if (ZYAN_FAILED(ZydisEncoderEncodeInstruction(
+                  &enc_req, instr.bytes, &length)))
+                return false;
+
               instr.length = length;
             }
           }
@@ -745,7 +750,6 @@ public:
       // This is an instruction entry.
       if (entry.blink != 0) {
         if (entry.sym_id != null_symbol_id) {
-          __debugbreak();
           return false;
         }
 

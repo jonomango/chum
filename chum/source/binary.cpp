@@ -382,13 +382,15 @@ bool binary::create(char const* const path) const {
       // correct operand values.
       ZydisDecodedInstruction decoded_instr;
       ZydisDecodedOperand decoded_ops[ZYDIS_MAX_OPERAND_COUNT];
-      ZYAN_ASSERT(ZYAN_SUCCESS(ZydisDecoderDecodeFull(&decoder_, instr.bytes,
-        instr.length, &decoded_instr, decoded_ops)));
+      if (ZYAN_FAILED(ZydisDecoderDecodeFull(&decoder_, instr.bytes,
+          instr.length, &decoded_instr, decoded_ops)))
+        return false;
 
       // Create an encoder request from the decoded instruction.
       ZydisEncoderRequest enc_req;
-      ZYAN_ASSERT(ZYAN_SUCCESS(ZydisEncoderDecodedInstructionToEncoderRequest(
-        &decoded_instr, decoded_ops, decoded_instr.operand_count_visible, &enc_req)));
+      if (ZYAN_FAILED(ZydisEncoderDecodedInstructionToEncoderRequest(
+          &decoded_instr, decoded_ops, decoded_instr.operand_count_visible, &enc_req)))
+        return false;
 
       // We want the encoder to choose the best branch size for us.
       enc_req.branch_type  = ZYDIS_BRANCH_TYPE_NONE;
@@ -445,8 +447,9 @@ bool binary::create(char const* const path) const {
       // Encode the new instruction.
       std::uint8_t instr_buffer[15];
       std::size_t instr_length = 15;
-      ZYAN_ASSERT(ZYAN_SUCCESS(ZydisEncoderEncodeInstructionAbsolute(&enc_req,
-        &instr_buffer, &instr_length, curr_instr_va)));
+      if (ZYAN_FAILED(ZydisEncoderEncodeInstructionAbsolute(&enc_req,
+          &instr_buffer, &instr_length, curr_instr_va)))
+        return false;
 
       // Append the new instruction to the text section.
       text_sec_data.insert(end(text_sec_data),

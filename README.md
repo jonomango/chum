@@ -1,3 +1,30 @@
+# chum
+
+`chum` is a binary rewriting tool for 64-bit PE files.
+
+## Disclaimer
+
+This is an old, incomplete project that I have abandoned and **will not** be working on.
+It is missing several key features and just has a flawed design. It is fun to mess
+around with, but that's about it. Feel free to create pull-requests or whatever though.
+
+## Building
+
+```powershell
+git clone --recursive https://github.com/jonomango/chum.git
+cd chum
+
+mkdir build
+cd build
+
+# Any variant of Visual Studio is fine.
+cmake -G "Visual Studio 16 2019" ..
+cmake --build .
+```
+
+## Example
+
+```cpp
 #include "chum.h"
 
 #include <algorithm>
@@ -22,8 +49,8 @@ void instrument(chum::binary& bin) {
     if (bb == block)
       continue;
 
-    // All memory references are treated as symbol IDs.
-    // CALL block
+    // Memory operands are replaced with symbol IDs.
+    // E8 00 00 00 00        CALL block
     bb->insert(bin.instr("\xE8", block));
   }
 }
@@ -47,4 +74,4 @@ int main() {
   bin->print();
   bin->create("output.dll");
 }
-
+```

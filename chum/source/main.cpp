@@ -35,16 +35,59 @@ void shuffle_blocks(chum::binary& bin) {
   std::shuffle(std::begin(bin.basic_blocks()), std::end(bin.basic_blocks()), rng);
 }
 
-int main() {
-  auto bin = chum::disassemble("hello-world-x64.dll");
-  if (!bin)
+void transform(chum::binary& bin) {
+  for (auto const bb : bin.basic_blocks()) {
+    for (auto i = bb->instructions.size(); i > 0; --i) {
+      auto& instr = bb->instructions[i - 1];
+
+      ZydisDecodedInstruction dinstr = {};
+      ZydisDecodedOperand operands[ZYDIS_MAX_OPERAND_COUNT];
+
+      // Fully decode the current instruction.
+      if (!ZYAN_SUCCESS(ZydisDecoderDecodeFull(bin.decoder(),
+          instr.bytes, instr.length, &dinstr, operands)))
+        continue;
+
+      ZydisEncoderRequest req = {};
+      ZydisEncoderDecodedInstructionToEncoderRequest(&dinstr,
+        operands, dinstr.operand_count_visible, &req);
+
+      // Split a single ADD instruction into 2 ADDs.
+      if (req.mnemonic == ZYDIS_MNEMONIC_ADD && req.operands[1].type == ZYDIS_OPERAND_TYPE_IMMEDIATE) {
+        auto const r = rand();
+
+        // First ADD.
+        req.operands[1].imm.s -= r;
+        instr = bin.instr(req);
+
+        // Second ADD.
+        req.operands[1].imm.s = r;
+        bb->insert(bin.instr(req), i);
+      }
+    }
+  }
+}
+
+int main(int const argc, char const* const* argv) {
+  if (argc < 2) {
+    std::printf("Not enough arguments.\n");
     return 0;
+  }
 
-  insert_nops(*bin);
-  instrument(*bin);
+  auto bin = chum::disassemble(argv[1]);
+  if (!bin) {
+    std::printf("Failed to disassemble binary.\n");
+    return 0;
+  }
+
+  // insert_nops(*bin);
+  // instrument(*bin);
   shuffle_blocks(*bin);
+  // transform(*bin);
 
-  bin->print();
-  bin->create("output.dll");
+  for (auto const b : bin->create())
+    std::printf("%.2X", b);
+
+  return 0;
 }
 

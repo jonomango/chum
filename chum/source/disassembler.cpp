@@ -1019,8 +1019,10 @@ std::optional<disassembled_binary> disassemble(char const* const path) {
   disassembler dasm = {};
 
   // Initialize the disassembler.
-  if (!dasm.initialize(path))
+  if (!dasm.initialize(path)) {
+    printf("Failed to initialize disassembler!\n");
     return {};
+  }
 
   // Create a data block for every data section.
   dasm.create_section_data_blocks();
@@ -1031,13 +1033,14 @@ std::optional<disassembled_binary> disassemble(char const* const path) {
   dasm.parse_exceptions();
   dasm.parse_relocs();
 
-  if (!dasm.disassemble())
+  if (!dasm.disassemble()) {
+    printf("Failed to disassemble binary!\n");
     return {};
+  }
 
   dasm.sort_basic_blocks();
 
   assert(dasm.verify());
-
   return std::move(dasm.bin);
 }
 

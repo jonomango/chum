@@ -9,7 +9,6 @@
 
 #include <Windows.h>
 #include <zycore/Format.h>
-#include <pe-builder/pe-builder.h>
 
 namespace chum {
 
@@ -224,7 +223,24 @@ void binary::print(bool const verbose) {
 
 // Create a new PE file from this binary.
 bool binary::create(char const* const path) const {
-  pb::pe_builder pe;
+  pb::pe_builder pe = {};
+  if (!create(pe))
+    return {};
+
+  return pe.write(path);
+}
+
+// Create a new PE file from this binary.
+std::vector<std::uint8_t> binary::create() const {
+  pb::pe_builder pe = {};
+  if (!create(pe))
+    return {};
+
+  return pe.write();
+}
+
+// Create a new PE file from this binary.
+bool binary::create(pb::pe_builder& pe) const {
   pe.file_characteristics(IMAGE_FILE_EXECUTABLE_IMAGE | IMAGE_FILE_DLL);
 
   // We don't want to resize in the middle of adding sections.
@@ -587,7 +603,7 @@ bool binary::create(char const* const path) const {
   if (entrypoint_)
     pe.entrypoint(sym_to_va[entrypoint_->sym_id.value]);
 
-  return pe.write(path);
+  return true;
 }
 
 // Get the entrypoint of this binary, if it exists.
@@ -738,6 +754,11 @@ import_routine* binary::get_or_create_import_routine(
   }
 
   return create_import_module(module_name)->create_routine(routine_name);
+}
+
+// Get the underlying Zydis decoder.
+ZydisDecoder* binary::decoder() {
+  return &decoder_;
 }
 
 } // namespace chum

@@ -1,5 +1,6 @@
 # build files
 build/
 
-# visual studio code files
+# IDE stuff
 .vscode/
+.cache/

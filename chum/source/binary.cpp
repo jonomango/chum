@@ -8,7 +8,7 @@
 #include <set>
 
 #include <Windows.h>
-#include <zycore/Format.h>
+#include <Zycore/Format.h>
 
 namespace chum {
 
@@ -81,12 +81,14 @@ binary::binary() {
     ZYDIS_FORMATTER_PROP_FORCE_RELATIVE_RIPREL, true);
 
   orig_zydis_format_operand_mem = hook_zydis_format_operand_mem;
+  const void* temp_orig_zydis_format_operand_mem = reinterpret_cast<const void*>(orig_zydis_format_operand_mem);
   ZydisFormatterSetHook(&formatter_, ZYDIS_FORMATTER_FUNC_FORMAT_OPERAND_MEM,
-    reinterpret_cast<void const**>(&orig_zydis_format_operand_mem));
+    reinterpret_cast<const void**>(&temp_orig_zydis_format_operand_mem));
 
   orig_zydis_format_operand_imm = hook_zydis_format_operand_imm;
+  const void* temp_orig_zydis_format_operand_imm = reinterpret_cast<const void*>(orig_zydis_format_operand_imm);
   ZydisFormatterSetHook(&formatter_, ZYDIS_FORMATTER_FUNC_FORMAT_OPERAND_IMM,
-    reinterpret_cast<void const**>(&orig_zydis_format_operand_imm));
+    reinterpret_cast<const void**>(&temp_orig_zydis_format_operand_imm));
 
   // Create the null symbol.
   auto const null_symbol = create_symbol(symbol_type::invalid, "<null>");
